@@ -1908,6 +1908,7 @@ dependencies = [
  "futures",
  "libp2p",
  "tokio",
+ "void",
 ]
 
 [[package]]

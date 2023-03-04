@@ -6,8 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libp2p = { version = "0.51.0", features = ["ping", "tokio", "tcp", "dns", "macros", "websocket", "noise", "mplex", "yamux"] }
-# libp2p-tcp = "0.39.0"
-# libp2p-dns = "0.39.0"
+libp2p = { version = "0.51.0", features = ["ping", "tokio", "tcp", "dns", "macros", "websocket", "noise", "mplex", "yamux", "mdns"] }
 futures = "0.3.26"
 tokio = "1.26.0"
+void = "1.0.2"
