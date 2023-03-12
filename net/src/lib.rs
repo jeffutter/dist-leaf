@@ -167,27 +167,25 @@ pub async fn main(
     let mut in_flight: HashMap<RequestId, (Instant, oneshot::Sender<KVResponseType>)> =
         HashMap::new();
 
-    let kv_server1 = kv_server.clone();
-    let _h1 = tokio::spawn(async move {
-        loop {
-            let (request, response_tx) = cli_cmd.recv().await.unwrap();
-            let mut kv_server = kv_server1.lock().await;
-
-            match request {
-                KVRequestType::Get(key) => {
-                    let res = kv_server.get(&key).await;
-                    response_tx.send(res).unwrap();
-                }
-                KVRequestType::Put(key, value) => {
-                    let res = kv_server.put(&key, &value).await;
-                    response_tx.send(res).unwrap();
-                }
-            }
-        }
-    });
-
     loop {
         select! {
+            Some((request, response_tx)) = cli_cmd.recv() => {
+                let kv_server1 = kv_server.clone();
+                tokio::spawn(async move {
+                    let mut kv_server = kv_server1.lock().await;
+
+                    match request {
+                        KVRequestType::Get(key) => {
+                            let res = kv_server.get(&key).await;
+                            response_tx.send(res).unwrap();
+                        }
+                        KVRequestType::Put(key, value) => {
+                            let res = kv_server.put(&key, &value).await;
+                            response_tx.send(res).unwrap();
+                        }
+                    }
+                });
+            },
             Some((peer_id, cmd, res_chan)) = cmd_channel.recv() => {
                 log::trace!("Remote Cmd: {:?}", cmd);
 
