@@ -20,10 +20,10 @@ use tokio::sync::{oneshot, Mutex};
 use void;
 
 pub fn start() -> (
-    Sender<String>,
+    Sender<(KVRequestType, oneshot::Sender<KVResponseType>)>,
     impl Future<Output = Result<(), Box<dyn Error>>>,
 ) {
-    let (tx, rx) = channel::<String>(1);
+    let (tx, rx) = channel::<(KVRequestType, oneshot::Sender<KVResponseType>)>(1);
 
     let future = main(rx);
 
@@ -132,7 +132,9 @@ impl KVServer {
     }
 }
 
-pub async fn main(mut rx: Receiver<String>) -> Result<(), Box<dyn Error>> {
+pub async fn main(
+    mut cli_cmd: Receiver<(KVRequestType, oneshot::Sender<KVResponseType>)>,
+) -> Result<(), Box<dyn Error>> {
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
     log::info!("Local peer id: {local_peer_id:?}");
@@ -168,9 +170,19 @@ pub async fn main(mut rx: Receiver<String>) -> Result<(), Box<dyn Error>> {
     let kv_server1 = kv_server.clone();
     let _h1 = tokio::spawn(async move {
         loop {
-            let line = rx.recv().await;
+            let (request, response_tx) = cli_cmd.recv().await.unwrap();
             let mut kv_server = kv_server1.lock().await;
-            handle_input_line(&mut kv_server, line.unwrap()).await;
+
+            match request {
+                KVRequestType::Get(key) => {
+                    let res = kv_server.get(&key).await;
+                    response_tx.send(res).unwrap();
+                }
+                KVRequestType::Put(key, value) => {
+                    let res = kv_server.put(&key, &value).await;
+                    response_tx.send(res).unwrap();
+                }
+            }
         }
     });
 
@@ -233,54 +245,6 @@ pub async fn main(mut rx: Receiver<String>) -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn handle_input_line(kv_server: &mut KVServer, line: String) {
-    let mut args = line.split(' ');
-
-    let next = args.next().map(|x| x.to_uppercase());
-
-    match next.as_deref() {
-        Some("GET") => {
-            let key = {
-                match args.next() {
-                    Some(key) => key,
-                    None => {
-                        println!("Expected key");
-                        return;
-                    }
-                }
-            };
-            let res = kv_server.get(key).await;
-            println!("Get: {:?}", res);
-        }
-        Some("PUT") => {
-            let key = {
-                match args.next() {
-                    Some(key) => key,
-                    None => {
-                        println!("Expected key");
-                        return;
-                    }
-                }
-            };
-            let value = {
-                match args.next() {
-                    Some(value) => value,
-                    None => {
-                        println!("Expected value");
-                        return;
-                    }
-                }
-            };
-
-            let res = kv_server.put(key, value).await;
-            println!("Put: {:?}", res);
-        }
-        _ => {
-            println!("expected GET, PUT");
-        }
-    }
-}
-
 /// Our network behaviour.
 ///
 /// For illustrative purposes, this includes the [`KeepAlive`](behaviour::KeepAlive) behaviour so a continuous sequence of
@@ -295,13 +259,13 @@ struct Behaviour {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum KVRequestType {
+pub enum KVRequestType {
     Get(String),
     Put(String, String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum KVResponseType {
+pub enum KVResponseType {
     Error(String),
     Result(Option<String>),
     Ok,

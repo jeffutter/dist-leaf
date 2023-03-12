@@ -1,5 +1,9 @@
 use env_logger::Env;
-use tokio::io::{self, AsyncBufReadExt};
+use net::KVRequestType;
+use tokio::{
+    io::{self, AsyncBufReadExt},
+    sync::oneshot,
+};
 
 #[tokio::main]
 async fn main() {
@@ -19,13 +23,68 @@ async fn main() {
                 .unwrap()
                 .expect("Stdin not to close");
 
-            if let Err(_) = command_channel.send(next_line).await {
-                println!("receiver dropped");
-                return;
+            match handle_input_line(next_line) {
+                None => (),
+                Some(request) => {
+                    let (tx, rx) = oneshot::channel();
+                    if let Err(_) = command_channel.send((request, tx)).await {
+                        println!("receiver dropped");
+                        return;
+                    }
+                    let res = rx.await.unwrap();
+                    println!("Result: {:?}", res);
+                }
             }
         }
     });
 
     let (res, _err) = tokio::join!(network, cli);
     res.unwrap();
+}
+
+fn handle_input_line(line: String) -> Option<KVRequestType> {
+    let mut args = line.split(' ');
+
+    let next = args.next().map(|x| x.to_uppercase());
+
+    match next.as_deref() {
+        Some("GET") => {
+            let key = {
+                match args.next() {
+                    Some(key) => key,
+                    None => {
+                        println!("Expected key");
+                        return None;
+                    }
+                }
+            };
+            Some(net::KVRequestType::Get(key.to_string()))
+        }
+        Some("PUT") => {
+            let key = {
+                match args.next() {
+                    Some(key) => key,
+                    None => {
+                        println!("Expected key");
+                        return None;
+                    }
+                }
+            };
+            let value = {
+                match args.next() {
+                    Some(value) => value,
+                    None => {
+                        println!("Expected value");
+                        return None;
+                    }
+                }
+            };
+
+            Some(KVRequestType::Put(key.to_string(), value.to_string()))
+        }
+        _ => {
+            println!("expected GET, PUT");
+            None
+        }
+    }
 }
