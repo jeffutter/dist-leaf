@@ -1,9 +1,6 @@
 use env_logger::Env;
 use net::KVRequestType;
-use tokio::{
-    io::{self, AsyncBufReadExt},
-    sync::oneshot,
-};
+use tokio::io::{self, AsyncBufReadExt};
 
 #[tokio::main]
 async fn main() {
@@ -11,7 +8,8 @@ async fn main() {
         "debug,netlink_proto=info,libp2p_ping=info,libp2p_swarm=info,libp2p_tcp=info,libp2p_mdns=info,libp2p_dns=info,yamux=info,multistream_select=info",
     ))
     .init();
-    let (command_channel, network) = net::start();
+    let mut dist_kv_server = net::DistKVServer::new().unwrap();
+    let dist_kv_client = dist_kv_server.client();
 
     let cli = tokio::spawn(async move {
         let mut stdin = io::BufReader::new(io::stdin()).lines();
@@ -26,19 +24,17 @@ async fn main() {
             match handle_input_line(next_line) {
                 None => (),
                 Some(request) => {
-                    let (tx, rx) = oneshot::channel();
-                    if let Err(_) = command_channel.send((request, tx)).await {
-                        println!("receiver dropped");
-                        return;
-                    }
-                    let res = rx.await.unwrap();
+                    let req = dist_kv_client.send(request);
+                    let res = req.await.unwrap();
                     println!("Result: {:?}", res);
                 }
             }
         }
     });
 
-    let (res, _err) = tokio::join!(network, cli);
+    let server = dist_kv_server.run();
+
+    let (res, _err) = tokio::join!(server, cli);
     res.unwrap();
 }
 

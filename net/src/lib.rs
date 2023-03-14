@@ -1,33 +1,183 @@
 use async_trait::async_trait;
 use consistent_hash_ring::Ring;
-use futures::Future;
+use futures::TryFutureExt;
 use libp2p::core::upgrade::{read_length_prefixed, write_length_prefixed};
 use libp2p::futures::{AsyncRead, AsyncWrite, AsyncWriteExt, StreamExt};
 use libp2p::ping::Event;
 use libp2p::request_response::{ProtocolName, ProtocolSupport, RequestId};
-use libp2p::swarm::{keep_alive, NetworkBehaviour, Swarm, SwarmEvent};
-use libp2p::{identity, mdns, ping, request_response, PeerId};
+use libp2p::swarm::{keep_alive, DialError, NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p::{identity, mdns, multiaddr, ping, request_response, PeerId, TransportError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::error::Error;
 use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
+use thiserror::Error;
 use tokio::io;
 use tokio::select;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::mpsc::{self, channel, Receiver, Sender};
+use tokio::sync::{oneshot, RwLock};
 use void;
 
-pub fn start() -> (
-    Sender<(KVRequestType, oneshot::Sender<KVResponseType>)>,
-    impl Future<Output = Result<(), Box<dyn Error>>>,
-) {
-    let (tx, rx) = channel::<(KVRequestType, oneshot::Sender<KVResponseType>)>(1);
+#[derive(Error, Debug)]
+pub enum KVServerError {
+    #[error("data store disconnected")]
+    Disconnect(#[from] io::Error),
+    #[error("network listen error")]
+    NetworkListen(#[from] multiaddr::Error),
+    #[error("network dial error")]
+    NetworkDial(#[from] DialError),
+    #[error("network transport error")]
+    NetworkTransport(#[from] TransportError<std::io::Error>),
+    #[error("channel error")]
+    ChannelRecv(#[from] oneshot::error::RecvError),
+    #[error("channel error")]
+    ChannelSend(#[from] mpsc::error::SendError<(KVRequestType, oneshot::Sender<KVResponseType>)>),
+    #[error("unknown kv store error")]
+    Unknown,
+}
 
-    let future = main(rx);
+pub struct DistKVServer {
+    local_command_tx: Sender<(KVRequestType, oneshot::Sender<KVResponseType>)>,
+    local_command_rx: Receiver<(KVRequestType, oneshot::Sender<KVResponseType>)>,
+    remote_command_rx: Receiver<(PeerId, KVRequestType, oneshot::Sender<KVResponseType>)>,
+    kv_server: Arc<RwLock<KVServer>>,
+    in_flight: HashMap<RequestId, (Instant, oneshot::Sender<KVResponseType>)>,
+    swarm: Swarm<Behaviour>,
+}
 
-    (tx, future)
+impl DistKVServer {
+    fn command_tx_channel(&self) -> Sender<(KVRequestType, oneshot::Sender<KVResponseType>)> {
+        self.local_command_tx.clone()
+    }
+
+    pub fn new() -> Result<Self, KVServerError> {
+        let (tx, rx) = channel::<(KVRequestType, oneshot::Sender<KVResponseType>)>(1);
+        let local_key = identity::Keypair::generate_ed25519();
+        let local_peer_id = PeerId::from(local_key.public());
+        log::info!("Local peer id: {local_peer_id:?}");
+
+        let transport = libp2p::tokio_development_transport(local_key)?;
+
+        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
+
+        let mut swarm = Swarm::with_tokio_executor(
+            transport,
+            Behaviour {
+                ping: ping::Behaviour::default(),
+                keep_alive: keep_alive::Behaviour::default(),
+                mdns,
+                request_response: request_response::Behaviour::new(
+                    KeyValueCodec(),
+                    iter::once((KeyValueProtocol(), ProtocolSupport::Full)),
+                    Default::default(),
+                ),
+            },
+            local_peer_id,
+        );
+
+        // Tell the swarm to listen on all interfaces and a random, OS-assigned
+        // port.
+        swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+        let (cmd_channel, kv_server) = KVServer::new(local_peer_id);
+        let kv_server = Arc::new(RwLock::new(kv_server));
+        let in_flight: HashMap<RequestId, (Instant, oneshot::Sender<KVResponseType>)> =
+            HashMap::new();
+
+        Ok(Self {
+            kv_server,
+            in_flight,
+            swarm,
+            local_command_tx: tx,
+            local_command_rx: rx,
+            remote_command_rx: cmd_channel,
+        })
+    }
+
+    pub fn client(&self) -> DistKVClient {
+        self.into()
+    }
+
+    pub async fn run(&mut self) -> Result<(), KVServerError> {
+        loop {
+            select! {
+                Some((request, response_tx)) = self.local_command_rx.recv() => {
+                    let kv_server = self.kv_server.clone();
+                    tokio::spawn(async move {
+
+                        match request {
+                            KVRequestType::Get(key) => {
+                                let res = kv_server.read().await.get(&key).await;
+                                response_tx.send(res).unwrap();
+                            }
+                            KVRequestType::Put(key, value) => {
+                                let res = kv_server.write().await.put(&key, &value).await;
+                                response_tx.send(res).unwrap();
+                            }
+                        }
+                    });
+                },
+                Some((peer_id, cmd, res_chan)) = self.remote_command_rx.recv() => {
+                    log::trace!("Remote Cmd: {:?}", cmd);
+
+                    let request_id = self.swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_request(&peer_id, KVRequest(cmd));
+
+                    self.in_flight.insert(request_id, (Instant::now(), res_chan));
+                },
+                event = self.swarm.select_next_some() => match event {
+                    SwarmEvent::NewListenAddr { address, .. } => log::info!("Listening on {address:?}"),
+                    SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(addrs))) => {
+                        for (id, addr) in addrs {
+                            self.swarm.dial(addr)?;
+                            log::info!("Dialed {id}");
+                        }
+                    }
+                    SwarmEvent::Behaviour(MyBehaviourEvent::RequestResponse(request_response::Event::Message { message, .. })) => match message {
+                        request_response::Message::Request { request_id: _, request, channel } => {
+                            let kv_server = self.kv_server.clone();
+                            let mut kv_server = kv_server.write().await;
+
+                            log::debug!("Request Received: {:?}", request);
+                            let KVRequest(request) = request;
+                            let res = kv_server.handle_request(request);
+                            self.swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_response(channel, KVResponse(res))
+                                .expect("Connection to peer to be still open.");
+                        }
+                        request_response::Message::Response { request_id, response } => {
+                            let KVResponse(response) = response;
+                            let (ts, response_chan) = self.in_flight.remove(&request_id).unwrap();
+                            let duration = ts.elapsed();
+                            log::debug!("Response Received: {:?} {:?} ({}µs)", request_id, response, duration.as_micros());
+                            response_chan.send(response).unwrap();
+                        },
+                    }
+                    SwarmEvent::Behaviour(MyBehaviourEvent::Ping(Event {peer, result})) => log::debug!("Ping from: {:?} - {:?}", peer, result),
+                    SwarmEvent::Behaviour(event) => log::debug!("Unknown Behaviour Event: {event:?}"),
+                    SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                        let kv_server = self.kv_server.clone();
+                        let mut kv_server = kv_server.write().await;
+                        log::info!("Connection Established: {:?}", peer_id);
+                        kv_server.add_peer(peer_id);
+                    }
+                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                        let kv_server = self.kv_server.clone();
+                        let mut kv_server = kv_server.write().await;
+                        log::info!("Connection Closed: {:?}", peer_id);
+                        kv_server.remove_peer(peer_id);
+                    }
+                    event => log::debug!("Unknown Event: {event:?}"),
+                    // _ => {}
+                }
+            }
+        }
+    }
 }
 
 struct KVServer {
@@ -132,114 +282,30 @@ impl KVServer {
     }
 }
 
-pub async fn main(
-    mut cli_cmd: Receiver<(KVRequestType, oneshot::Sender<KVResponseType>)>,
-) -> Result<(), Box<dyn Error>> {
-    let local_key = identity::Keypair::generate_ed25519();
-    let local_peer_id = PeerId::from(local_key.public());
-    log::info!("Local peer id: {local_peer_id:?}");
+pub struct DistKVClient {
+    local_command_tx: Sender<(KVRequestType, oneshot::Sender<KVResponseType>)>,
+}
 
-    let transport = libp2p::tokio_development_transport(local_key)?;
+impl DistKVClient {
+    pub fn new(local_command_tx: Sender<(KVRequestType, oneshot::Sender<KVResponseType>)>) -> Self {
+        Self { local_command_tx }
+    }
 
-    let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
+    pub fn send(
+        &self,
+        request: KVRequestType,
+    ) -> impl std::future::Future<Output = Result<KVResponseType, KVServerError>> + '_ {
+        let (tx, rx) = oneshot::channel();
+        self.local_command_tx
+            .send((request, tx))
+            .map_err(|e| e.into())
+            .and_then(|_| rx.map_err(|e| e.into()))
+    }
+}
 
-    let mut swarm = Swarm::with_tokio_executor(
-        transport,
-        Behaviour {
-            ping: ping::Behaviour::default(),
-            keep_alive: keep_alive::Behaviour::default(),
-            mdns,
-            request_response: request_response::Behaviour::new(
-                KeyValueCodec(),
-                iter::once((KeyValueProtocol(), ProtocolSupport::Full)),
-                Default::default(),
-            ),
-        },
-        local_peer_id,
-    );
-
-    // Tell the swarm to listen on all interfaces and a random, OS-assigned
-    // port.
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    let (mut cmd_channel, kv_server) = KVServer::new(local_peer_id);
-    let kv_server = Arc::new(Mutex::new(kv_server));
-    let mut in_flight: HashMap<RequestId, (Instant, oneshot::Sender<KVResponseType>)> =
-        HashMap::new();
-
-    loop {
-        select! {
-            Some((request, response_tx)) = cli_cmd.recv() => {
-                let kv_server1 = kv_server.clone();
-                tokio::spawn(async move {
-                    let mut kv_server = kv_server1.lock().await;
-
-                    match request {
-                        KVRequestType::Get(key) => {
-                            let res = kv_server.get(&key).await;
-                            response_tx.send(res).unwrap();
-                        }
-                        KVRequestType::Put(key, value) => {
-                            let res = kv_server.put(&key, &value).await;
-                            response_tx.send(res).unwrap();
-                        }
-                    }
-                });
-            },
-            Some((peer_id, cmd, res_chan)) = cmd_channel.recv() => {
-                log::trace!("Remote Cmd: {:?}", cmd);
-
-                let request_id = swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_request(&peer_id, KVRequest(cmd));
-
-                in_flight.insert(request_id, (Instant::now(), res_chan));
-            },
-            event = swarm.select_next_some() => match event {
-                SwarmEvent::NewListenAddr { address, .. } => log::info!("Listening on {address:?}"),
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(addrs))) => {
-                    for (id, addr) in addrs {
-                        swarm.dial(addr)?;
-                        log::info!("Dialed {id}");
-                    }
-                }
-                SwarmEvent::Behaviour(MyBehaviourEvent::RequestResponse(request_response::Event::Message { message, .. })) => match message {
-                    request_response::Message::Request { request_id: _, request, channel } => {
-                        log::debug!("Request Received: {:?}", request);
-                        let mut kv_server = kv_server.lock().await;
-                        let KVRequest(request) = request;
-                        let res = kv_server.handle_request(request);
-                        swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_response(channel, KVResponse(res))
-                            .expect("Connection to peer to be still open.");
-                    }
-                    request_response::Message::Response { request_id, response } => {
-                        let KVResponse(response) = response;
-                        let (ts, response_chan) = in_flight.remove(&request_id).unwrap();
-                        let duration = ts.elapsed();
-                        log::debug!("Response Received: {:?} {:?} ({}µs)", request_id, response, duration.as_micros());
-                        response_chan.send(response).unwrap();
-                    },
-                }
-                SwarmEvent::Behaviour(MyBehaviourEvent::Ping(Event {peer, result})) => log::debug!("Ping from: {:?} - {:?}", peer, result),
-                SwarmEvent::Behaviour(event) => log::debug!("Unknown Behaviour Event: {event:?}"),
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    log::info!("Connection Established: {:?}", peer_id);
-                    let mut kv_server = kv_server.lock().await;
-                    kv_server.add_peer(peer_id);
-                }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    log::info!("Connection Closed: {:?}", peer_id);
-                    let mut kv_server = kv_server.lock().await;
-                    kv_server.remove_peer(peer_id);
-                }
-                event => log::debug!("Unknown Event: {event:?}"),
-                // _ => {}
-            }
-        }
+impl From<&DistKVServer> for DistKVClient {
+    fn from(kv_server: &DistKVServer) -> Self {
+        DistKVClient::new(kv_server.command_tx_channel())
     }
 }
 
