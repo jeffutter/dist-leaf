@@ -1,6 +1,11 @@
+use std::thread;
+
 use env_logger::Env;
 use net::KVRequestType;
-use tokio::io::{self, AsyncBufReadExt};
+use tokio::{
+    io::{self, AsyncBufReadExt},
+    runtime,
+};
 
 #[tokio::main]
 async fn main() {
@@ -10,6 +15,28 @@ async fn main() {
     .init();
     let mut dist_kv_server = net::DistKVServer::new().unwrap();
     let dist_kv_client = dist_kv_server.client();
+
+    let core_ids = core_affinity::get_core_ids().unwrap();
+    let handles = core_ids
+        .into_iter()
+        .map(|id| {
+            thread::spawn(move || {
+                // Pin this thread to a single CPU core.
+                let res = core_affinity::set_for_current(id);
+                if res {
+                    let rt = runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    log::info!("Starting Thread: #{:?}", id);
+                    rt.block_on(async {
+                        let mut dist_kv_server = net::DistKVServer::new().unwrap();
+                        dist_kv_server.run().await.unwrap()
+                    })
+                }
+            })
+        })
+        .collect::<Vec<_>>();
 
     let cli = tokio::spawn(async move {
         let mut stdin = io::BufReader::new(io::stdin()).lines();
@@ -36,6 +63,10 @@ async fn main() {
 
     let (res, _err) = tokio::join!(server, cli);
     res.unwrap();
+
+    for handle in handles.into_iter() {
+        handle.join().unwrap();
+    }
 }
 
 fn handle_input_line(line: String) -> Option<KVRequestType> {
