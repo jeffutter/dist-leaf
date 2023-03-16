@@ -282,6 +282,7 @@ impl KVServer {
     }
 }
 
+#[derive(Clone)]
 pub struct DistKVClient {
     local_command_tx: Sender<(KVRequestType, oneshot::Sender<KVResponseType>)>,
 }
