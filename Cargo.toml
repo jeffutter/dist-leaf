@@ -2,5 +2,7 @@
 members = [
   "cli",
   "net",
-  "bench"
+  "bench",
+  "quic-server",
+  "quic-client"
 ]
