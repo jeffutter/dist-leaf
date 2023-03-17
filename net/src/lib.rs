@@ -227,9 +227,9 @@ impl DistKVServer {
 
     pub async fn run(&mut self) -> Result<(), KVServerError> {
         let client = DistKVClient::new(self.local_command_tx.clone());
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        log::info!("quic port: {port}");
+        // let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+        // let port = listener.local_addr().unwrap().port();
+        // log::info!("quic port: {port}");
 
         let mut server = Server::builder()
             .with_tls((CERT_PEM, KEY_PEM))
@@ -237,6 +237,9 @@ impl DistKVServer {
             .with_io("0.0.0.0:0")?
             .start()
             .unwrap();
+
+        let socket_addr = server.local_addr()?;
+        log::info!("quic port: {:?}", socket_addr.port());
 
         loop {
             select! {

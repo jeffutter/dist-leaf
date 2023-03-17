@@ -11,7 +11,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_io("0.0.0.0:0")?
         .start()?;
 
-    let addr: SocketAddr = "127.0.0.1:4433".parse()?;
+    let args: Vec<String> = std::env::args().collect();
+    let port = args.get(1).unwrap();
+
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
     let connect = Connect::new(addr).with_server_name("localhost");
     let mut connection = client.connect(connect).await?;
 
@@ -21,6 +24,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // open a new stream and split the receiving and sending sides
     let stream = connection.open_bidirectional_stream().await?;
     let (mut receive_stream, mut send_stream) = stream.split();
+
+    println!("Client Ready");
 
     // spawn a task that copies responses from the server to stdout
     tokio::spawn(async move {
