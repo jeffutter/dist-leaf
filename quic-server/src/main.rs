@@ -1,6 +1,6 @@
 use bytes::Bytes;
+use consistent_hash_ring::{Ring, RingBuilder};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use rand::seq::IteratorRandom;
 use s2n_quic::{client::Connect, stream::BidirectionalStream, Client, Connection, Server};
 use std::{
     collections::HashMap,
@@ -10,7 +10,11 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{sync::RwLock, task, time};
+use tokio::{
+    sync::RwLock,
+    task,
+    time::{self, Instant},
+};
 
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/cert.pem"));
@@ -49,6 +53,52 @@ impl S2SConnection {
         let data = self.stream.receive().await?;
         Ok(data)
     }
+}
+
+struct S2SConnections {
+    connections: HashMap<SocketAddr, S2SConnection>,
+    ring: Ring<SocketAddr>,
+    client: Client,
+    local_addr: SocketAddr,
+}
+
+impl S2SConnections {
+    fn new(client: Client, local_addr: SocketAddr) -> Self {
+        let mut ring = RingBuilder::default().build();
+        ring.insert(local_addr);
+
+        Self {
+            connections: HashMap::new(),
+            ring,
+            client,
+            local_addr,
+        }
+    }
+
+    async fn add(&mut self, addr: SocketAddr) -> Result<(), Box<dyn Error>> {
+        if let None = self.connections.get(&addr) {
+            let s2s_connection = S2SConnection::new(addr, self.client.clone()).await?;
+            self.connections.insert(addr, s2s_connection);
+            self.ring.insert(addr);
+        }
+
+        Ok(())
+    }
+
+    fn get(&mut self, key: String) -> Destination {
+        let socket_addr = self.ring.get(key);
+        if socket_addr == &self.local_addr {
+            Destination::Local
+        } else {
+            let connection = self.connections.get_mut(socket_addr).unwrap();
+            Destination::Remote(connection)
+        }
+    }
+}
+
+enum Destination<'a> {
+    Remote(&'a mut S2SConnection),
+    Local,
 }
 
 #[tokio::main]
@@ -93,12 +143,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .parse()
     .unwrap();
 
-    let connections: HashMap<SocketAddr, S2SConnection> = HashMap::new();
-    let connections = Arc::new(RwLock::new(connections));
     let client = Client::builder()
         .with_tls(CERT_PEM)?
         .with_io("0.0.0.0:0")?
         .start()?;
+
+    let connections = S2SConnections::new(client, server_socket_addr);
+    let connections = Arc::new(RwLock::new(connections));
 
     let connections1 = connections.clone();
     let mdns_search = task::spawn(async move {
@@ -126,13 +177,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         );
 
                         if socket_addr != server_socket_addr {
-                            let client = client.clone();
-                            let mut connections = connections1.write().await;
-                            if let None = connections.get(&socket_addr) {
-                                let connection =
-                                    S2SConnection::new(socket_addr, client).await.unwrap();
-                                connections.insert(socket_addr, connection);
-                            }
+                            connections1.write().await.add(socket_addr).await.unwrap();
                         }
                     }
                     other_event => {
@@ -143,33 +188,72 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let connections1 = connections.clone();
     while let Some(mut connection) = server.accept().await {
-        let connections2 = connections1.clone();
+        let connections1 = connections.clone();
         // spawn a new task for the connection
         tokio::spawn(async move {
-            let connections3 = connections2.clone();
+            println!("New Connection");
             while let Ok(Some(mut stream)) = connection.accept_bidirectional_stream().await {
-                let connections4 = connections3.clone();
+                println!("New Stream");
+                let connections2 = connections1.clone();
                 // spawn a new task for the stream
                 tokio::spawn(async move {
                     // echo any data back to the stream
                     while let Ok(Some(data)) = stream.receive().await {
-                        let mut connections = connections4.write().await;
+                        println!("New data");
+                        let start = Instant::now();
+                        let req = net::decode_request(data.as_ref()).unwrap();
+                        println!(
+                            "decoded: {}",
+                            Instant::now().duration_since(start).as_micros()
+                        );
 
-                        let connection = connections.values_mut().choose(&mut rand::thread_rng());
-
-                        match connection {
-                            Some(c) => {
-                                println!("Echoing: {:?}", data);
-                                // stream.send(data).await.expect("stream should be open");
-                                c.send(data.into()).await.unwrap();
-                                let data = c.recv().await.unwrap().unwrap();
-                                stream.send(data).await.expect("stream should be open");
-                                // println!("Received: {:?}", data);
+                        match req {
+                            net::KVRequestType::Get(key) => {
+                                match connections2.write().await.get(key) {
+                                    Destination::Remote(connection) => {
+                                        println!("Forward to: {:?}", connection);
+                                        connection.send(data).await.unwrap();
+                                        let data = connection.recv().await.unwrap().unwrap();
+                                        stream.send(data).await.expect("stream should be open");
+                                    }
+                                    Destination::Local => {
+                                        println!("Serve Local");
+                                        println!(
+                                            "checked connection: {}",
+                                            Instant::now().duration_since(start).as_micros()
+                                        );
+                                        let res =
+                                            net::encode_response(net::KVResponseType::Result(
+                                                Some("HIT - GET".to_string()),
+                                            ));
+                                        println!(
+                                            "encoded: {}",
+                                            Instant::now().duration_since(start).as_micros()
+                                        );
+                                        stream.send(res).await.expect("stream should be open");
+                                        println!(
+                                            "sent: {}",
+                                            Instant::now().duration_since(start).as_micros()
+                                        );
+                                    }
+                                }
                             }
-                            None => {
-                                println!("No Connections");
+                            net::KVRequestType::Put(key, value) => {
+                                match connections2.write().await.get(key) {
+                                    Destination::Remote(connection) => {
+                                        connection.send(data).await.unwrap();
+                                        let data = connection.recv().await.unwrap().unwrap();
+                                        stream.send(data).await.expect("stream should be open");
+                                    }
+                                    Destination::Local => {
+                                        let res =
+                                            net::encode_response(net::KVResponseType::Result(
+                                                Some(format!("HIT - PUT {value}").to_string()),
+                                            ));
+                                        stream.send(res).await.expect("stream should be open");
+                                    }
+                                }
                             }
                         }
                     }

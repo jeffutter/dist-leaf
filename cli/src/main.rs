@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             .await
                             .unwrap();
                         // let res = net::decode_get_response(buf);
-                        let res = net::decode_request(buf).unwrap();
+                        let res = net::decode_request(&buf).unwrap();
                         println!("Result: {:?}", res);
                     }
                 }

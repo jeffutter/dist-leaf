@@ -2948,8 +2948,10 @@ name = "quic-server"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "consistent_hash_ring",
  "local-ip-address",
  "mdns-sd",
+ "net",
  "rand 0.8.5",
  "s2n-quic",
  "tokio",

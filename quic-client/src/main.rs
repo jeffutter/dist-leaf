@@ -1,6 +1,6 @@
 use s2n_quic::{client::Connect, Client};
 use std::{error::Error, net::SocketAddr, thread};
-use tokio::sync::mpsc::channel;
+use tokio::{sync::mpsc::channel, time::Instant};
 
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/cert.pem"));
@@ -44,11 +44,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         loop {
             if let Some(req) = rx.recv().await {
+                let start = Instant::now();
                 let encoded = net::encode_request(req);
+                println!(
+                    "encoded: {}µs",
+                    Instant::now().duration_since(start).as_micros()
+                );
                 stream.send(encoded).await.unwrap();
+                println!(
+                    "sent: {}µs",
+                    Instant::now().duration_since(start).as_micros()
+                );
                 if let Some(data) = stream.receive().await.unwrap() {
-                    let decoded = net::decode_response(data.into()).unwrap();
-                    println!("Response: {:?}", decoded);
+                    println!(
+                        "received: {}µs",
+                        Instant::now().duration_since(start).as_micros()
+                    );
+                    let decoded = net::decode_response(data.as_ref()).unwrap();
+                    println!(
+                        "Response: {:?} {}µs",
+                        decoded,
+                        Instant::now().duration_since(start).as_micros()
+                    );
                 }
             }
         }
@@ -57,16 +74,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .unwrap();
 
     cli.join().unwrap();
-
-    // spawn a task that copies responses from the server to stdout
-    // tokio::spawn(async move {
-    //     let mut stdout = tokio::io::stdout();
-    //     let _ = tokio::io::copy(&mut receive_stream, &mut stdout).await;
-    // });
-
-    // copy data from stdin and send it to the server
-    // let mut stdin = tokio::io::stdin();
-    // tokio::io::copy(&mut stdin, &mut send_stream).await?;
 
     Ok(())
 }

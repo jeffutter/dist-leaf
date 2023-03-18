@@ -88,7 +88,7 @@ pub fn encode_response(response: KVResponseType) -> Bytes {
     buf.into()
 }
 
-pub fn decode_request(buf: Vec<u8>) -> Result<KVRequestType, KVServerError> {
+pub fn decode_request(buf: &[u8]) -> Result<KVRequestType, KVServerError> {
     let message_reader =
         serialize_packed::read_message(buf.reader(), ::capnp::message::ReaderOptions::new())
             .unwrap();
@@ -122,7 +122,7 @@ pub fn decode_request(buf: Vec<u8>) -> Result<KVRequestType, KVServerError> {
     }
 }
 
-pub fn decode_response(buf: Vec<u8>) -> Result<KVResponseType, KVServerError> {
+pub fn decode_response(buf: &[u8]) -> Result<KVResponseType, KVServerError> {
     let message_reader =
         serialize_packed::read_message(buf.reader(), ::capnp::message::ReaderOptions::new())
             .unwrap();
@@ -264,7 +264,7 @@ impl DistKVServer {
                       log::info!("Req Spawn");
                         // echo any data back to the stream
                         while let Ok(Some(data)) = stream.receive().await {
-                          let req = decode_request(data.into()).unwrap();
+                          let req = decode_request(data.as_ref()).unwrap();
 
                           let res = client.send(req).await.unwrap();
 
