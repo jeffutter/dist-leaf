@@ -204,7 +204,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let start = Instant::now();
                         let req = net::decode_request(data.as_ref()).unwrap();
                         println!(
-                            "decoded: {}",
+                            "decoded: {}µs",
                             Instant::now().duration_since(start).as_micros()
                         );
 
@@ -220,7 +220,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     Destination::Local => {
                                         println!("Serve Local");
                                         println!(
-                                            "checked connection: {}",
+                                            "checked connection: {}µs",
                                             Instant::now().duration_since(start).as_micros()
                                         );
                                         let res =
@@ -228,12 +228,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 Some("HIT - GET".to_string()),
                                             ));
                                         println!(
-                                            "encoded: {}",
+                                            "encoded: {}µs",
                                             Instant::now().duration_since(start).as_micros()
                                         );
                                         stream.send(res).await.expect("stream should be open");
                                         println!(
-                                            "sent: {}",
+                                            "sent: {}µs",
                                             Instant::now().duration_since(start).as_micros()
                                         );
                                     }
