@@ -1,9 +1,9 @@
 use env_logger::Env;
 use net::KVRequestType;
-use s2n_quic::{client::Connect, provider::io::tokio::Builder as IoBuilder, Client};
+use s2n_quic::{client::Connect, Client};
+use std::error::Error;
 use std::net::ToSocketAddrs;
 use std::thread;
-use std::{error::Error, net::SocketAddr};
 use tokio::{
     io::{self, AsyncBufReadExt},
     runtime,
@@ -61,8 +61,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 match handle_input_line(next_line) {
                     None => (),
-                    Some(KVRequestType::Get(key)) => {
-                        let req = net::encode_get_request(key);
+                    Some(kv_request) => {
+                        // let req = net::encode_get_request(key);
+                        let req = net::encode_request(kv_request);
                         tokio::io::copy(&mut req.to_vec().as_slice(), &mut send_stream)
                             .await
                             .unwrap();
@@ -71,11 +72,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         tokio::io::copy(&mut receive_stream, &mut buf)
                             .await
                             .unwrap();
-                        let res = net::decode_get_response(buf);
-
+                        // let res = net::decode_get_response(buf);
+                        let res = net::decode_request(buf).unwrap();
                         println!("Result: {:?}", res);
                     }
-                    Some(_) => todo!(),
                 }
             }
         })

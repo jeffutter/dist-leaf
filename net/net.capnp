@@ -1,17 +1,27 @@
 @0xdca578873284febb;
 
-struct GetRequest {
-  key @0 :Text;
+struct Request {
+  union {
+    get :group {
+      key @0 :Text;
+    }
+    put :group {
+      key @1 :Text;
+      value @2 :Text;
+    }
+  }
 }
 
-struct GetResponse {
-  value @0 :Text;
-}
-
-struct PutRequest {
-  key @0 :Text;
-  value @1 :Text;
-}
-
-struct PutResponse {
+struct Response {
+  union {
+    result :group {
+      value @0 :Text;
+    }
+    ok :group {
+      ok @1 :Void;
+    }
+    error :group {
+      message @2 :Text;
+    }
+  }
 }

@@ -32,12 +32,22 @@ pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/.
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static KEY_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/key.pem"));
 
-pub fn encode_get_request(key: String) -> Bytes {
+pub fn encode_request(request: KVRequestType) -> Bytes {
     let mut message = ::capnp::message::Builder::new_default();
 
-    let mut response = message.init_root::<net_capnp::get_request::Builder>();
+    let res = message.init_root::<net_capnp::request::Builder>();
 
-    response.set_key(&key);
+    match request {
+        KVRequestType::Get(key) => {
+            res.init_get().set_key(&key);
+        }
+        KVRequestType::Put(key, value) => {
+            let mut put = res.init_put();
+            put.set_key(&key);
+            put.set_value(&value);
+        }
+    }
+
     let mut buf = vec![];
     {
         let reference = buf.by_ref();
@@ -48,101 +58,98 @@ pub fn encode_get_request(key: String) -> Bytes {
     buf.into()
 }
 
-pub fn decode_get_request(buf: Vec<u8>) -> KVRequestType {
+pub fn encode_response(response: KVResponseType) -> Bytes {
+    let mut message = ::capnp::message::Builder::new_default();
+
+    let res = message.init_root::<net_capnp::response::Builder>();
+
+    match response {
+        KVResponseType::Error(e) => {
+            res.init_error().set_message(&e);
+        }
+        KVResponseType::Result(Some(x)) => {
+            res.init_result().set_value(&x);
+        }
+        KVResponseType::Result(None) => {
+            res.init_result();
+        }
+        KVResponseType::Ok => {
+            res.init_ok();
+        }
+    }
+
+    let mut buf = vec![];
+    {
+        let reference = buf.by_ref();
+        let writer = reference.writer();
+        serialize_packed::write_message(writer, &message).unwrap();
+    }
+
+    buf.into()
+}
+
+pub fn decode_request(buf: Vec<u8>) -> Result<KVRequestType, KVServerError> {
     let message_reader =
         serialize_packed::read_message(buf.reader(), ::capnp::message::ReaderOptions::new())
             .unwrap();
 
     let request = message_reader
-        .get_root::<net_capnp::get_request::Reader>()
+        .get_root::<net_capnp::request::Reader>()
         .unwrap();
 
-    KVRequestType::Get(request.get_key().unwrap().to_string())
-}
+    match request.which().map_err(|_e| KVServerError::Unknown)? {
+        net_capnp::request::Which::Get(get_request) => {
+            let key = get_request
+                .get_key()
+                .map_err(|_e| KVServerError::Unknown)?
+                .to_string();
 
-pub fn encode_get_response(value: String) -> Bytes {
-    let mut message = ::capnp::message::Builder::new_default();
+            Ok(KVRequestType::Get(key))
+        }
+        net_capnp::request::Which::Put(put_request) => {
+            let key = put_request
+                .get_key()
+                .map_err(|_e| KVServerError::Unknown)?
+                .to_string();
 
-    let mut response = message.init_root::<net_capnp::get_response::Builder>();
+            let value = put_request
+                .get_value()
+                .map_err(|_e| KVServerError::Unknown)?
+                .to_string();
 
-    response.set_value(&value);
-    let mut buf = vec![];
-    {
-        let reference = buf.by_ref();
-        let writer = reference.writer();
-        serialize_packed::write_message(writer, &message).unwrap();
+            Ok(KVRequestType::Put(key, value))
+        }
     }
-
-    buf.into()
 }
 
-pub fn decode_get_response(buf: Vec<u8>) -> KVResponseType {
+pub fn decode_response(buf: Vec<u8>) -> Result<KVResponseType, KVServerError> {
     let message_reader =
         serialize_packed::read_message(buf.reader(), ::capnp::message::ReaderOptions::new())
             .unwrap();
 
-    let request = message_reader
-        .get_root::<net_capnp::get_response::Reader>()
+    let response = message_reader
+        .get_root::<net_capnp::response::Reader>()
         .unwrap();
 
-    KVResponseType::Result(Some(request.get_value().unwrap().to_string()))
-}
+    match response.which().map_err(|_e| KVServerError::Unknown)? {
+        net_capnp::response::Which::Result(result) => {
+            let value = result
+                .get_value()
+                .map_err(|_e| KVServerError::Unknown)?
+                .to_string();
 
-pub fn encode_put_request(key: String, value: String) -> Bytes {
-    let mut message = ::capnp::message::Builder::new_default();
-
-    let mut response = message.init_root::<net_capnp::put_request::Builder>();
-
-    response.set_key(&key);
-    response.set_value(&value);
-    let mut buf = vec![];
-    {
-        let reference = buf.by_ref();
-        let writer = reference.writer();
-        serialize_packed::write_message(writer, &message).unwrap();
+            // Null Result?
+            Ok(KVResponseType::Result(Some(value)))
+        }
+        net_capnp::response::Which::Ok(_) => Ok(KVResponseType::Ok),
+        net_capnp::response::Which::Error(result) => {
+            let error = result
+                .get_message()
+                .map_err(|_e| KVServerError::Unknown)?
+                .to_string();
+            Ok(KVResponseType::Error(error))
+        }
     }
-
-    buf.into()
-}
-
-pub fn decode_put_request(buf: Vec<u8>) -> KVRequestType {
-    let message_reader =
-        serialize_packed::read_message(buf.reader(), ::capnp::message::ReaderOptions::new())
-            .unwrap();
-
-    let request = message_reader
-        .get_root::<net_capnp::put_request::Reader>()
-        .unwrap();
-
-    KVRequestType::Put(
-        request.get_key().unwrap().to_string(),
-        request.get_value().unwrap().to_string(),
-    )
-}
-
-pub fn encode_put_response() -> Bytes {
-    let message = ::capnp::message::Builder::new_default();
-
-    let mut buf = vec![];
-    {
-        let reference = buf.by_ref();
-        let writer = reference.writer();
-        serialize_packed::write_message(writer, &message).unwrap();
-    }
-
-    buf.into()
-}
-
-pub fn decode_put_response(buf: Vec<u8>) -> KVResponseType {
-    let message_reader =
-        serialize_packed::read_message(buf.reader(), ::capnp::message::ReaderOptions::new())
-            .unwrap();
-
-    let _request = message_reader
-        .get_root::<net_capnp::put_response::Reader>()
-        .unwrap();
-
-    KVResponseType::Ok
 }
 
 #[derive(Error, Debug)]
@@ -257,40 +264,12 @@ impl DistKVServer {
                       log::info!("Req Spawn");
                         // echo any data back to the stream
                         while let Ok(Some(data)) = stream.receive().await {
-
-                          let message_reader = serialize_packed::read_message(
-                             data.reader(),
-                            ::capnp::message::ReaderOptions::new(),
-                          ).unwrap();
-
-                          let request = message_reader.get_root::<net_capnp::get_request::Reader>().unwrap();
-
-                          let req = KVRequestType::Get(request.get_key().unwrap().to_string());
+                          let req = decode_request(data.into()).unwrap();
 
                           let res = client.send(req).await.unwrap();
 
-                          let mut message = ::capnp::message::Builder::new_default();
-
-                          let mut response = message.init_root::<net_capnp::get_response::Builder>();
-
-                          match res {
-                            KVResponseType::Error(_) => todo!(),
-                            KVResponseType::Result(Some(val)) => {
-                              response.set_value(&val);
-                              let mut buf = vec![];
-                              {
-                                let reference = buf.by_ref();
-                                let writer = reference.writer();
-                                serialize_packed::write_message(writer, &message).unwrap() ;
-                              }
-
-                              stream.send(buf.into()).await.expect("stream should be open");
-                            },
-                            KVResponseType::Result(None) => todo!(),
-                            KVResponseType::Ok => todo!(),
-                          }
-
-
+                          let res_data = encode_response(res);
+                          stream.send(res_data.into()).await.expect("stream should be open");
                         }
                       }).await.unwrap();
                   }
