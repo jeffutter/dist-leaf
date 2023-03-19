@@ -1110,8 +1110,10 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "consistent_hash_ring",
+ "core_affinity",
  "db",
  "local-ip-address",
+ "log",
  "mdns-sd",
  "net",
  "rand 0.8.5",

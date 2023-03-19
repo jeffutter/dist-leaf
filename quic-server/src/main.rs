@@ -10,10 +10,12 @@ use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
+    thread,
     time::Duration,
 };
 use thiserror::Error;
 use tokio::{
+    runtime,
     sync::RwLock,
     task,
     time::{self, Instant},
@@ -334,11 +336,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::net::IpAddr::V6(_) => todo!(),
     };
 
-    let id = Uuid::new_v4();
+    let core_ids = core_affinity::get_core_ids().unwrap();
+    let handles = core_ids
+        .into_iter()
+        .map(|id| {
+            thread::spawn(move || {
+                // Pin this thread to a single CPU core.
+                let res = core_affinity::set_for_current(id);
+                if res {
+                    let rt = runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    log::info!("Starting Thread: #{:?}", id);
+                    rt.block_on(async {
+                        let id = Uuid::new_v4();
+                        let mut vnode = VNode::new(id, local_ip).unwrap();
 
-    let mut vnode = VNode::new(id, local_ip)?;
+                        vnode.run().await.unwrap();
+                        Ok::<(), ServerError>(())
+                    })
+                    .unwrap();
+                }
 
-    vnode.run().await?;
+                Ok::<(), ServerError>(())
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for handle in handles.into_iter() {
+        handle.join().unwrap().unwrap();
+    }
 
     Ok(())
 }
