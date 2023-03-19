@@ -145,6 +145,15 @@ pub enum KVRequestType {
     Put(String, String),
 }
 
+impl KVRequestType {
+    pub fn key(&self) -> &String {
+        match self {
+            KVRequestType::Get(key) => key,
+            KVRequestType::Put(key, _) => key,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KVResponseType {
     Error(String),

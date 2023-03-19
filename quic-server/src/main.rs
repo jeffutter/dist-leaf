@@ -230,15 +230,15 @@ impl VNode {
                     Instant::now().duration_since(start).as_micros()
                 );
 
-                match req {
-                    net::KVRequestType::Get(key) => match connections.lock().await.get(&key) {
-                        Destination::Remote(connection) => {
-                            println!("Forward to: {:?}", connection);
-                            connection.send(data).await.unwrap();
-                            let data = connection.recv().await.unwrap().unwrap();
-                            stream.send(data).await.expect("stream should be open");
-                        }
-                        Destination::Local => {
+                match connections.lock().await.get(req.key()) {
+                    Destination::Remote(connection) => {
+                        println!("Forward to: {:?}", connection);
+                        connection.send(data).await.unwrap();
+                        let data = connection.recv().await.unwrap().unwrap();
+                        stream.send(data).await.expect("stream should be open");
+                    }
+                    Destination::Local => match req {
+                        net::KVRequestType::Get(key) => {
                             println!("Serve Local");
                             println!(
                                 "checked connection: {}µs",
@@ -260,21 +260,12 @@ impl VNode {
                                 Instant::now().duration_since(start).as_micros()
                             );
                         }
-                    },
-                    net::KVRequestType::Put(key, value) => {
-                        match connections.lock().await.get(&key) {
-                            Destination::Remote(connection) => {
-                                connection.send(data).await.unwrap();
-                                let data = connection.recv().await.unwrap().unwrap();
-                                stream.send(data).await.expect("stream should be open");
-                            }
-                            Destination::Local => {
-                                storage.put(&key, &value).unwrap();
-                                let res = net::encode_response(net::KVResponseType::Ok);
-                                stream.send(res).await.expect("stream should be open");
-                            }
+                        net::KVRequestType::Put(key, value) => {
+                            storage.put(&key, &value).unwrap();
+                            let res = net::encode_response(net::KVResponseType::Ok);
+                            stream.send(res).await.expect("stream should be open");
                         }
-                    }
+                    },
                 }
             }
         }
