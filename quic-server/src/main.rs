@@ -85,7 +85,7 @@ impl S2SConnections {
         Ok(())
     }
 
-    fn get(&mut self, key: String) -> Destination {
+    fn get(&mut self, key: &str) -> Destination {
         let socket_addr = self.ring.get(key);
         if socket_addr == &self.local_addr {
             Destination::Local
@@ -188,14 +188,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    let storage = db::Database::new_tmp();
+
     while let Some(mut connection) = server.accept().await {
         let connections1 = connections.clone();
+        let storage1 = storage.clone();
         // spawn a new task for the connection
         tokio::spawn(async move {
             println!("New Connection");
             while let Ok(Some(mut stream)) = connection.accept_bidirectional_stream().await {
                 println!("New Stream");
                 let connections2 = connections1.clone();
+                let storage2 = storage1.clone();
                 // spawn a new task for the stream
                 tokio::spawn(async move {
                     // echo any data back to the stream
@@ -210,7 +214,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                         match req {
                             net::KVRequestType::Get(key) => {
-                                match connections2.write().await.get(key) {
+                                match connections2.write().await.get(&key) {
                                     Destination::Remote(connection) => {
                                         println!("Forward to: {:?}", connection);
                                         connection.send(data).await.unwrap();
@@ -223,10 +227,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             "checked connection: {}µs",
                                             Instant::now().duration_since(start).as_micros()
                                         );
-                                        let res =
-                                            net::encode_response(net::KVResponseType::Result(
-                                                Some("HIT - GET".to_string()),
-                                            ));
+                                        let res_data = storage2.get(&key).unwrap();
+                                        println!(
+                                            "fetched: {}µs",
+                                            Instant::now().duration_since(start).as_micros()
+                                        );
+                                        let res = net::encode_response(
+                                            net::KVResponseType::Result(res_data),
+                                        );
                                         println!(
                                             "encoded: {}µs",
                                             Instant::now().duration_since(start).as_micros()
@@ -240,17 +248,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             net::KVRequestType::Put(key, value) => {
-                                match connections2.write().await.get(key) {
+                                match connections2.write().await.get(&key) {
                                     Destination::Remote(connection) => {
                                         connection.send(data).await.unwrap();
                                         let data = connection.recv().await.unwrap().unwrap();
                                         stream.send(data).await.expect("stream should be open");
                                     }
                                     Destination::Local => {
-                                        let res =
-                                            net::encode_response(net::KVResponseType::Result(
-                                                Some(format!("HIT - PUT {value}").to_string()),
-                                            ));
+                                        storage2.put(&key, &value).unwrap();
+                                        let res = net::encode_response(net::KVResponseType::Ok);
                                         stream.send(res).await.expect("stream should be open");
                                     }
                                 }

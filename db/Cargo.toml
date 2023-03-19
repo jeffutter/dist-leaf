@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 rocksdb = "0.20.1"
+thiserror = "1"
+tempfile = "3.4.0"

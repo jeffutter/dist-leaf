@@ -14,3 +14,4 @@ local-ip-address = "0.5.1"
 rand = "0.8"
 consistent_hash_ring = "0.8.0"
 net = { path = "../net" }
+db = { path = "../db" }
