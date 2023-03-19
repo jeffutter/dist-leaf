@@ -16,7 +16,7 @@ use std::{
 use thiserror::Error;
 use tokio::{
     runtime,
-    sync::RwLock,
+    sync::Mutex,
     task,
     time::{self, Instant},
 };
@@ -111,7 +111,7 @@ pub enum ServerError {
 }
 
 struct VNode {
-    connections: Arc<RwLock<S2SConnections>>,
+    connections: Arc<Mutex<S2SConnections>>,
     storage: db::Database,
     socket_addr: SocketAddr,
     mdns_receiver: Receiver<ServiceEvent>,
@@ -161,7 +161,7 @@ impl VNode {
             .start()?;
 
         let connections = S2SConnections::new(client, socket_addr);
-        let connections = Arc::new(RwLock::new(connections));
+        let connections = Arc::new(Mutex::new(connections));
         let storage = db::Database::new_tmp();
 
         Ok(Self {
@@ -174,7 +174,7 @@ impl VNode {
     }
 
     fn mdns_loop(
-        connections: Arc<RwLock<S2SConnections>>,
+        connections: Arc<Mutex<S2SConnections>>,
         local_socket_addr: SocketAddr,
         mdns_receiver: Receiver<ServiceEvent>,
     ) -> impl Future<Output = Result<(), ServerError>> {
@@ -203,7 +203,7 @@ impl VNode {
                             );
 
                             if socket_addr != local_socket_addr {
-                                connections.write().await.add(socket_addr).await?;
+                                connections.lock().await.add(socket_addr).await?;
                             }
                         }
                         other_event => {
@@ -217,7 +217,7 @@ impl VNode {
 
     fn handle_stream(
         mut stream: BidirectionalStream,
-        connections: Arc<RwLock<S2SConnections>>,
+        connections: Arc<Mutex<S2SConnections>>,
         storage: db::Database,
     ) -> impl Future<Output = ()> {
         async move {
@@ -231,7 +231,7 @@ impl VNode {
                 );
 
                 match req {
-                    net::KVRequestType::Get(key) => match connections.write().await.get(&key) {
+                    net::KVRequestType::Get(key) => match connections.lock().await.get(&key) {
                         Destination::Remote(connection) => {
                             println!("Forward to: {:?}", connection);
                             connection.send(data).await.unwrap();
@@ -262,7 +262,7 @@ impl VNode {
                         }
                     },
                     net::KVRequestType::Put(key, value) => {
-                        match connections.write().await.get(&key) {
+                        match connections.lock().await.get(&key) {
                             Destination::Remote(connection) => {
                                 connection.send(data).await.unwrap();
                                 let data = connection.recv().await.unwrap().unwrap();
@@ -282,7 +282,7 @@ impl VNode {
 
     fn handle_connection(
         mut connection: connection::Connection,
-        connections: Arc<RwLock<S2SConnections>>,
+        connections: Arc<Mutex<S2SConnections>>,
         storage: db::Database,
     ) -> impl Future<Output = ()> {
         async move {
