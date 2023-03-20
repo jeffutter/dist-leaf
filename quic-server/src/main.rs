@@ -1,9 +1,8 @@
 use bytes::Bytes;
 use consistent_hash_ring::{Ring, RingBuilder};
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
-use s2n_quic::{
-    client::Connect, connection, stream::BidirectionalStream, Client, Connection, Server,
-};
+use net::{KVRequestType, KVResponseType};
+use s2n_quic::{client::Connect, connection, stream::BidirectionalStream, Client, Server};
 use std::{
     collections::HashMap,
     error::Error,
@@ -15,8 +14,8 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    runtime,
-    sync::Mutex,
+    runtime, select,
+    sync::{mpsc, oneshot, Mutex},
     task,
     time::{self, Instant},
 };
@@ -27,11 +26,20 @@ pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/.
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static KEY_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/key.pem"));
 
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct VNodeId {
+    node_id: Uuid,
+    core_id: Uuid,
+}
+
+impl VNodeId {
+    fn new(node_id: Uuid, core_id: Uuid) -> Self {
+        Self { node_id, core_id }
+    }
+}
+
 #[derive(Debug)]
 struct S2SConnection {
-    addr: SocketAddr,
-    client: Client,
-    connection: Connection,
     stream: BidirectionalStream,
 }
 
@@ -42,12 +50,7 @@ impl S2SConnection {
         connection.keep_alive(true)?;
         let stream = connection.open_bidirectional_stream().await?;
 
-        Ok(Self {
-            addr,
-            client,
-            connection,
-            stream,
-        })
+        Ok(Self { stream })
     }
 
     async fn send(&mut self, data: Bytes) -> Result<(), Box<dyn Error>> {
@@ -62,42 +65,68 @@ impl S2SConnection {
 }
 
 struct S2SConnections {
-    connections: HashMap<SocketAddr, S2SConnection>,
-    ring: Ring<SocketAddr>,
+    connections: HashMap<VNodeId, S2SConnection>,
+    channels: HashMap<VNodeId, mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>>,
+    ring: Ring<VNodeId>,
     client: Client,
-    local_addr: SocketAddr,
+    vnode_id: VNodeId,
 }
 
 impl S2SConnections {
-    fn new(client: Client, local_addr: SocketAddr) -> Self {
+    fn new(client: Client, vnode_id: VNodeId) -> Self {
         let mut ring = RingBuilder::default().build();
-        ring.insert(local_addr);
+        ring.insert(vnode_id.clone());
 
         Self {
             connections: HashMap::new(),
+            channels: HashMap::new(),
             ring,
             client,
-            local_addr,
+            vnode_id,
         }
     }
 
-    async fn add(&mut self, addr: SocketAddr) -> Result<(), ServerError> {
-        if let None = self.connections.get(&addr) {
+    async fn add_connection(
+        &mut self,
+        vnode_id: VNodeId,
+        addr: SocketAddr,
+    ) -> Result<(), ServerError> {
+        if let None = self.connections.get(&vnode_id) {
             let s2s_connection = S2SConnection::new(addr, self.client.clone()).await?;
-            self.connections.insert(addr, s2s_connection);
-            self.ring.insert(addr);
+            self.connections.insert(vnode_id.clone(), s2s_connection);
+            self.ring.insert(vnode_id);
         }
 
         Ok(())
     }
 
+    fn add_channel(
+        &mut self,
+        vnode_id: VNodeId,
+        channel: mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>,
+    ) {
+        if let None = self.channels.get(&vnode_id) {
+            self.channels.insert(vnode_id.clone(), channel);
+            self.ring.insert(vnode_id);
+        }
+    }
+
     fn get(&mut self, key: &str) -> Destination {
-        let socket_addr = self.ring.get(key);
-        if socket_addr == &self.local_addr {
-            Destination::Local
-        } else {
-            let connection = self.connections.get_mut(socket_addr).unwrap();
-            Destination::Remote(connection)
+        let vnode_id = self.ring.get(key);
+
+        match vnode_id {
+            vnode_id if vnode_id == &self.vnode_id => Destination::Local,
+            VNodeId {
+                node_id,
+                core_id: _,
+            } if node_id == &self.vnode_id.node_id => {
+                let channel = self.channels.get_mut(vnode_id).unwrap();
+                Destination::Adjacent(channel)
+            }
+            vnode_id => {
+                let connection = self.connections.get_mut(vnode_id).unwrap();
+                Destination::Remote(connection)
+            }
         }
     }
 }
@@ -116,10 +145,18 @@ struct VNode {
     socket_addr: SocketAddr,
     mdns_receiver: Receiver<ServiceEvent>,
     server: s2n_quic::Server,
+    rx: mpsc::Receiver<(Bytes, oneshot::Sender<Bytes>)>,
 }
 
 impl VNode {
-    fn new(id: Uuid, local_ip: Ipv4Addr) -> Result<Self, Box<dyn Error>> {
+    fn new(
+        node_id: Uuid,
+        core_id: Uuid,
+        local_ip: Ipv4Addr,
+        rx: mpsc::Receiver<(Bytes, oneshot::Sender<Bytes>)>,
+        vnode_to_tx: HashMap<VNodeId, mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let vnode_id = VNodeId::new(node_id, core_id);
         let mdns = ServiceDaemon::new().expect("Failed to create daemon");
 
         let service_type = "_mdns-quic-db._udp.local.";
@@ -130,17 +167,23 @@ impl VNode {
             .with_io("0.0.0.0:0")?
             .start()?;
 
-        let instance_name = format!("node-{}", id);
+        // node-id and core-id is too long
+        let instance_name = format!("node-{}", core_id);
         let host_ipv4: Ipv4Addr = local_ip;
         let host_name = format!("{}.local.", host_ipv4);
         let port = server.local_addr()?.port();
+        let properties = [
+            ("node_id".to_string(), node_id.to_string()),
+            ("core_id".to_string(), core_id.to_string()),
+        ];
+        println!("Properties: {:?}", properties);
         let my_service = ServiceInfo::new(
             service_type,
             &instance_name,
             &host_name,
             host_ipv4,
             port,
-            None,
+            &properties[..],
         )
         .unwrap();
 
@@ -160,7 +203,10 @@ impl VNode {
             .with_io("0.0.0.0:0")?
             .start()?;
 
-        let connections = S2SConnections::new(client, socket_addr);
+        let mut connections = S2SConnections::new(client, vnode_id);
+        for (vnode_id, tx) in vnode_to_tx {
+            connections.add_channel(vnode_id, tx)
+        }
         let connections = Arc::new(Mutex::new(connections));
         let storage = db::Database::new_tmp();
 
@@ -170,6 +216,7 @@ impl VNode {
             socket_addr,
             server,
             mdns_receiver: receiver,
+            rx,
         })
     }
 
@@ -186,6 +233,18 @@ impl VNode {
                 while let Ok(event) = mdns_receiver.recv_async().await {
                     match event {
                         ServiceEvent::ServiceResolved(info) => {
+                            let node_id: Uuid = info
+                                .get_property_val_str("node_id")
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            let core_id: Uuid = info
+                                .get_property_val_str("core_id")
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            let vnode_id = VNodeId::new(node_id, core_id);
+
                             println!(
                                 "Resolved a new service: {} {}",
                                 info.get_fullname(),
@@ -203,7 +262,11 @@ impl VNode {
                             );
 
                             if socket_addr != local_socket_addr {
-                                connections.lock().await.add(socket_addr).await?;
+                                connections
+                                    .lock()
+                                    .await
+                                    .add_connection(vnode_id, socket_addr)
+                                    .await?;
                             }
                         }
                         other_event => {
@@ -237,8 +300,15 @@ impl VNode {
                         let data = connection.recv().await.unwrap().unwrap();
                         stream.send(data).await.expect("stream should be open");
                     }
+                    Destination::Adjacent(channel) => {
+                        println!("Forward to Adjacent: {:?}", channel);
+                        let (tx, rx) = oneshot::channel();
+                        channel.send((data, tx)).await.unwrap();
+                        let data = rx.await.unwrap();
+                        stream.send(data).await.expect("stream should be open");
+                    }
                     Destination::Local => match req {
-                        net::KVRequestType::Get(key) => {
+                        KVRequestType::Get(key) => {
                             println!("Serve Local");
                             println!(
                                 "checked connection: {}µs",
@@ -249,7 +319,7 @@ impl VNode {
                                 "fetched: {}µs",
                                 Instant::now().duration_since(start).as_micros()
                             );
-                            let res = net::encode_response(net::KVResponseType::Result(res_data));
+                            let res = net::encode_response(KVResponseType::Result(res_data));
                             println!(
                                 "encoded: {}µs",
                                 Instant::now().duration_since(start).as_micros()
@@ -260,9 +330,9 @@ impl VNode {
                                 Instant::now().duration_since(start).as_micros()
                             );
                         }
-                        net::KVRequestType::Put(key, value) => {
+                        KVRequestType::Put(key, value) => {
                             storage.put(&key, &value).unwrap();
-                            let res = net::encode_response(net::KVResponseType::Ok);
+                            let res = net::encode_response(KVResponseType::Ok);
                             stream.send(res).await.expect("stream should be open");
                         }
                     },
@@ -294,29 +364,68 @@ impl VNode {
         let mdns_receiver = self.mdns_receiver.clone();
         let local_socket_addr = self.socket_addr;
 
-        let mdns_search = task::spawn(Self::mdns_loop(
+        let _mdns_search = task::spawn(Self::mdns_loop(
             self.connections.clone(),
             local_socket_addr,
             mdns_receiver,
         ));
 
-        while let Some(connection) = self.server.accept().await {
-            // spawn a new task for the connection
-            tokio::spawn(Self::handle_connection(
-                connection,
-                self.connections.clone(),
-                storage.clone(),
-            ));
+        loop {
+            select! {
+                Some(connection) = self.server.accept() => {
+                    // spawn a new task for the connection
+                    tokio::spawn(Self::handle_connection(
+                        connection,
+                        self.connections.clone(),
+                        storage.clone(),
+                    ));
+                }
+                Some((data, tx)) = self.rx.recv() => {
+                    let start = Instant::now();
+                    let req = net::decode_request(data.as_ref()).unwrap();
+                    println!(
+                        "decoded: {}µs",
+                        Instant::now().duration_since(start).as_micros()
+                    );
+                    match req {
+                        KVRequestType::Get(key) => {
+                            println!("Serve Local");
+                            println!(
+                                "checked connection: {}µs",
+                                Instant::now().duration_since(start).as_micros()
+                            );
+                            let res_data = storage.get(&key).unwrap();
+                            println!(
+                                "fetched: {}µs",
+                                Instant::now().duration_since(start).as_micros()
+                            );
+                            let res = net::encode_response(KVResponseType::Result(res_data));
+                            println!(
+                                "encoded: {}µs",
+                                Instant::now().duration_since(start).as_micros()
+                            );
+                            tx.send(res).unwrap();
+                            println!(
+                                "sent: {}µs",
+                                Instant::now().duration_since(start).as_micros()
+                            );
+                        }
+                        KVRequestType::Put(key, value) => {
+                            storage.put(&key, &value).unwrap();
+                            let res = net::encode_response(KVResponseType::Ok);
+                            tx.send(res).unwrap();
+                        }
+                    }
+
+                }
+            }
         }
-
-        mdns_search.await??;
-
-        Ok(())
     }
 }
 
 enum Destination<'a> {
     Remote(&'a mut S2SConnection),
+    Adjacent(&'a mut mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>),
     Local,
 }
 
@@ -327,10 +436,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::net::IpAddr::V6(_) => todo!(),
     };
 
+    let node_id = Uuid::new_v4();
+
     let core_ids = core_affinity::get_core_ids().unwrap();
+
+    let (mut core_to_vnode_id, mut core_to_rx, core_to_tx): (
+        HashMap<usize, VNodeId>,
+        HashMap<usize, mpsc::Receiver<(Bytes, oneshot::Sender<Bytes>)>>,
+        HashMap<VNodeId, mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>>,
+    ) = core_ids.iter().fold(
+        (HashMap::new(), HashMap::new(), HashMap::new()),
+        |(mut core_to_vnode_id, mut rx_acc, mut tx_acc), id| {
+            let id = id.id;
+            let core_id = Uuid::new_v4();
+            let vnode_id = VNodeId::new(node_id, core_id);
+            let (tx, rx) = tokio::sync::mpsc::channel::<(Bytes, oneshot::Sender<Bytes>)>(1);
+            core_to_vnode_id.insert(id, vnode_id.clone());
+            rx_acc.insert(id, rx);
+            tx_acc.insert(vnode_id, tx);
+            (core_to_vnode_id, rx_acc, tx_acc)
+        },
+    );
+
     let handles = core_ids
         .into_iter()
         .map(|id| {
+            let rx = core_to_rx.remove(&id.id).unwrap();
+            let vnode_id = core_to_vnode_id.remove(&id.id).unwrap();
+            let VNodeId { node_id, core_id } = vnode_id;
+            let core_to_tx = core_to_tx.clone();
             thread::spawn(move || {
                 // Pin this thread to a single CPU core.
                 let res = core_affinity::set_for_current(id);
@@ -341,8 +475,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .unwrap();
                     log::info!("Starting Thread: #{:?}", id);
                     rt.block_on(async {
-                        let id = Uuid::new_v4();
-                        let mut vnode = VNode::new(id, local_ip).unwrap();
+                        let mut vnode =
+                            VNode::new(node_id, core_id, local_ip, rx, core_to_tx).unwrap();
 
                         vnode.run().await.unwrap();
                         Ok::<(), ServerError>(())
