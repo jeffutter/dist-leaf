@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes};
-use capnp::serialize_packed;
+use capnp::serialize;
 use std::io::Write;
 use thiserror::Error;
 use tokio::io;
@@ -29,7 +29,7 @@ pub fn encode_request(request: KVRequestType) -> Bytes {
     {
         let reference = buf.by_ref();
         let writer = reference.writer();
-        serialize_packed::write_message(writer, &message).unwrap();
+        serialize::write_message(writer, &message).unwrap();
     }
 
     buf.into()
@@ -59,7 +59,7 @@ pub fn encode_response(response: KVResponseType) -> Bytes {
     {
         let reference = buf.by_ref();
         let writer = reference.writer();
-        serialize_packed::write_message(writer, &message).unwrap();
+        serialize::write_message(writer, &message).unwrap();
     }
 
     buf.into()
@@ -67,8 +67,7 @@ pub fn encode_response(response: KVResponseType) -> Bytes {
 
 pub fn decode_request(buf: &[u8]) -> Result<KVRequestType, KVServerError> {
     let message_reader =
-        serialize_packed::read_message(buf.reader(), ::capnp::message::ReaderOptions::new())
-            .unwrap();
+        serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();
 
     let request = message_reader
         .get_root::<net_capnp::request::Reader>()
@@ -101,8 +100,7 @@ pub fn decode_request(buf: &[u8]) -> Result<KVRequestType, KVServerError> {
 
 pub fn decode_response(buf: &[u8]) -> Result<KVResponseType, KVServerError> {
     let message_reader =
-        serialize_packed::read_message(buf.reader(), ::capnp::message::ReaderOptions::new())
-            .unwrap();
+        serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();
 
     let response = message_reader
         .get_root::<net_capnp::response::Reader>()

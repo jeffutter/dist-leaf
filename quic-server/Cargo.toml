@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 s2n-quic = "1"
 tokio = { version = "1.26.0", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
 mdns-sd = "0.7.1"
 bytes = "1"
 local-ip-address = "0.5.1"
@@ -19,3 +20,5 @@ net = { path = "../net" }
 db = { path = "../db" }
 core_affinity = "0.8.0"
 log = "0.4.17"
+futures = "0.3"
+env_logger = "0.10"
