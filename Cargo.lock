@@ -374,6 +374,7 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
+ "log",
  "rocksdb",
  "tempfile",
  "thiserror",
@@ -1112,6 +1113,7 @@ dependencies = [
 name = "quic-client"
 version = "0.1.0"
 dependencies = [
+ "log",
  "net",
  "s2n-quic",
  "tokio",

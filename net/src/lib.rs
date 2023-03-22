@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use capnp::serialize;
 use std::io::Write;
 use thiserror::Error;
@@ -7,6 +7,57 @@ use tokio::sync::oneshot;
 
 pub mod net_capnp {
     include!(concat!(env!("OUT_DIR"), "/net_capnp.rs"));
+}
+
+pub struct ProtoReader {
+    buf: BytesMut,
+}
+
+impl ProtoReader {
+    pub fn new() -> Self {
+        Self {
+            buf: BytesMut::with_capacity(4096),
+        }
+    }
+
+    pub fn add_data(&mut self, data: Bytes) {
+        // Seems Hacky:
+        // Problem is, the bytes _are_ remaining in the buffer, however they haven't been written
+        // in from `data` yet
+        let old_len = self.buf.len();
+        self.buf.extend_from_slice(&data);
+        self.buf.truncate(old_len + data.len());
+    }
+
+    pub fn read_message(&mut self) -> Option<Bytes> {
+        let mut bytes_to_read: usize = 4;
+        let mut size_data = self.buf.clone();
+
+        if size_data.remaining() < 4 {
+            return None;
+        }
+
+        let num_segments = size_data.get_u32_le() + 1;
+        log::debug!("Segments: {}", num_segments);
+
+        for _ in 0..num_segments {
+            bytes_to_read += (size_data.get_u32_le() * 8) as usize;
+        }
+
+        if bytes_to_read % 8 != 0 {
+            bytes_to_read += 4;
+        }
+
+        log::debug!("{} > {}", bytes_to_read, self.buf.remaining());
+
+        if bytes_to_read > self.buf.remaining() {
+            log::debug!("Full Message not In Buffer");
+            return None;
+        }
+
+        let data = self.buf.split_to(bytes_to_read);
+        Some(data.freeze())
+    }
 }
 
 pub fn encode_request(request: KVRequestType) -> Bytes {

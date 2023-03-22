@@ -1,6 +1,4 @@
 use std::io::BufRead;
-use std::thread;
-use std::time::Duration;
 
 use criterion::BenchmarkId;
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -11,16 +9,16 @@ use tokio::runtime;
 
 async fn put(kvs: &Vec<(&String, &String)>, mut client: DistKVClient) {
     for (key, value) in kvs {
-        println!("Putting: {} - {}", key, value);
+        log::debug!("Putting: {} - {}", key, value);
         let request = net::KVRequestType::Put(key.to_string(), value.to_string());
-        println!("Putting Req - {:?}", request);
+        log::debug!("Putting Req - {:?}", request);
         client.request(request).await.unwrap();
     }
 }
 
 async fn get(kvs: &Vec<(&String, &String)>, mut client: DistKVClient) {
     for (key, _value) in kvs {
-        println!("Getting: {}", key);
+        log::debug!("Getting: {}", key);
         let request = net::KVRequestType::Get(key.to_string());
         client.request(request).await.unwrap();
     }

@@ -39,11 +39,11 @@ impl Database {
         match self.db.get(key.as_bytes())? {
             Some(v) => {
                 let result = String::from_utf8(v).unwrap();
-                println!("Finding '{}' returns '{}'", key, result);
+                log::debug!("Finding '{}' returns '{}'", key, result);
                 Ok(Some(result))
             }
             None => {
-                println!("Finding '{}' returns None", key);
+                log::debug!("Finding '{}' returns None", key);
                 Ok(None)
             }
         }

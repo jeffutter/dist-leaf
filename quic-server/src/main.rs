@@ -1,22 +1,15 @@
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::Bytes;
 use consistent_hash_ring::{Ring, RingBuilder};
 use env_logger::Env;
-use futures::StreamExt;
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 use net::{KVRequestType, KVResponseType};
-use s2n_quic::{
-    client::Connect,
-    connection,
-    stream::{BidirectionalStream, ReceiveStream},
-    Client, Server,
-};
+use s2n_quic::{client::Connect, connection, stream::BidirectionalStream, Client, Server};
 use std::{
     collections::HashMap,
     error::Error,
     future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
-    task::Poll,
     thread,
     time::Duration,
 };
@@ -156,106 +149,6 @@ struct VNode {
     rx: mpsc::Receiver<(Bytes, oneshot::Sender<Bytes>)>,
 }
 
-struct DataStream {
-    stream: ReceiveStream,
-    buf: BytesMut,
-}
-
-impl DataStream {
-    pub fn new(stream: ReceiveStream) -> Self {
-        Self {
-            stream,
-            buf: BytesMut::with_capacity(4096),
-        }
-    }
-
-    fn read_message(&mut self) -> Option<Bytes> {
-        let mut bytes_to_read: usize = 4;
-        let mut size_data = self.buf.clone();
-
-        if size_data.remaining() < 4 {
-            return None;
-        }
-
-        let num_segments = size_data.get_u32_le() + 1;
-        log::debug!("Segments: {}", num_segments);
-
-        for _ in 0..num_segments {
-            bytes_to_read += (size_data.get_u32_le() * 8) as usize;
-        }
-
-        if bytes_to_read % 8 != 0 {
-            bytes_to_read += 4;
-        }
-
-        log::debug!("{} > {}", bytes_to_read, self.buf.remaining());
-
-        // Problem is, the bytes _are_ remaining in the buffer, however they haven't been written
-        // in from `data` yet
-        if bytes_to_read > self.buf.remaining() {
-            log::debug!("Full Message not In Buffer");
-            return None;
-        }
-
-        let data = self.buf.split_to(bytes_to_read);
-        log::debug!("Data: {:?}", data);
-        Some(data.freeze())
-    }
-}
-
-impl futures::stream::Stream for DataStream {
-    type Item = Result<Bytes, s2n_quic::stream::Error>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        log::debug!("Poll");
-        match self.read_message() {
-            Some(bytes) => {
-                log::debug!("Stream: Outer Message Found");
-                Poll::Ready(Some(Ok(bytes)))
-            }
-            None => {
-                log::debug!("Stream: Outer No Complete Message");
-
-                match futures::ready!(self.stream.poll_receive(cx)) {
-                    Ok(Some(data)) => {
-                        log::debug!("Stream: Quic Data Received");
-
-                        let old_len = self.buf.len();
-                        self.buf.extend_from_slice(&data);
-                        self.buf.truncate(old_len + data.len());
-                        match self.read_message() {
-                            Some(bytes) => {
-                                log::debug!("Stream: Inner Message Found");
-                                Poll::Ready(Some(Ok(bytes)))
-                            }
-                            None => {
-                                log::debug!("Stream: Inner, no complete message: {:?}", self.buf);
-                                // let x = self.stream.poll_receive(cx);
-                                // log::debug!("X: {:?}", x);
-                                Poll::Pending
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        log::debug!("Stream: None");
-                        Poll::Ready(None)
-                    }
-                    Err(e) => {
-                        log::debug!("Stream: Error");
-                        Poll::Ready(Some(Err(e)))
-                    } // Poll::Pending => {
-                      //     log::debug!("Pending");
-                      //     Poll::Pending
-                      // }
-                }
-            }
-        }
-    }
-}
-
 impl VNode {
     fn new(
         node_id: Uuid,
@@ -280,6 +173,7 @@ impl VNode {
         let host_ipv4: Ipv4Addr = local_ip;
         let host_name = format!("{}.local.", host_ipv4);
         let port = server.local_addr()?.port();
+        log::info!("Starting Server on Port: {}", port);
         let properties = [
             ("node_id".to_string(), node_id.to_string()),
             ("core_id".to_string(), core_id.to_string()),
@@ -393,73 +287,65 @@ impl VNode {
         storage: db::Database,
     ) -> impl Future<Output = ()> {
         async move {
-            let (receive_stream, mut send_stream) = stream.split();
-            let mut data_stream = DataStream::new(receive_stream);
+            let (mut receive_stream, mut send_stream) = stream.split();
+            let mut data_stream = net::ProtoReader::new();
 
-            loop {
-                match data_stream.next().await {
-                    Some(Ok(data)) => {
-                        let start = Instant::now();
-                        log::debug!("Received Data: {:?}", data);
-                        let req = net::decode_request(data.as_ref()).unwrap();
-                        log::debug!(
-                            "decoded: {}µs",
-                            Instant::now().duration_since(start).as_micros()
-                        );
+            while let Some(data) = receive_stream.receive().await.unwrap() {
+                data_stream.add_data(data);
+                if let Some(data) = data_stream.read_message() {
+                    let start = Instant::now();
+                    log::debug!("Received Data: {:?}", data);
+                    let req = net::decode_request(data.as_ref()).unwrap();
+                    log::debug!(
+                        "decoded: {}µs",
+                        Instant::now().duration_since(start).as_micros()
+                    );
 
-                        match connections.lock().await.get(req.key()) {
-                            Destination::Remote(connection) => {
-                                log::debug!("Forward to: {:?}", connection);
-                                log::debug!("Forwarding Data:     {:?}", data);
-                                connection.send(data).await.unwrap();
-                                let data = connection.recv().await.unwrap().unwrap();
-                                send_stream.send(data).await.expect("stream should be open");
-                            }
-                            Destination::Adjacent(channel) => {
-                                log::debug!("Forward to Adjacent");
-                                log::debug!("Forwarding Data:     {:?}", data);
-                                let (tx, rx) = oneshot::channel();
-                                channel.send((data, tx)).await.unwrap();
-                                let data = rx.await.unwrap();
-                                send_stream.send(data).await.expect("stream should be open");
-                            }
-                            Destination::Local => match req {
-                                KVRequestType::Get(key) => {
-                                    log::debug!("Serve Local");
-                                    log::debug!(
-                                        "checked connection: {}µs",
-                                        Instant::now().duration_since(start).as_micros()
-                                    );
-                                    let res_data = storage.get(&key).unwrap();
-                                    log::debug!(
-                                        "fetched: {}µs",
-                                        Instant::now().duration_since(start).as_micros()
-                                    );
-                                    let res =
-                                        net::encode_response(KVResponseType::Result(res_data));
-                                    log::debug!(
-                                        "encoded: {}µs",
-                                        Instant::now().duration_since(start).as_micros()
-                                    );
-                                    send_stream.send(res).await.expect("stream should be open");
-                                    log::debug!(
-                                        "sent: {}µs",
-                                        Instant::now().duration_since(start).as_micros()
-                                    );
-                                }
-                                KVRequestType::Put(key, value) => {
-                                    storage.put(&key, &value).unwrap();
-                                    let res = net::encode_response(KVResponseType::Ok);
-                                    send_stream.send(res).await.expect("stream should be open");
-                                }
-                            },
+                    match connections.lock().await.get(req.key()) {
+                        Destination::Remote(connection) => {
+                            log::debug!("Forward to: {:?}", connection);
+                            log::debug!("Forwarding Data:     {:?}", data);
+                            connection.send(data).await.unwrap();
+                            let data = connection.recv().await.unwrap().unwrap();
+                            send_stream.send(data).await.expect("stream should be open");
                         }
-                    }
-                    Some(Err(e)) => {
-                        log::debug!("Error: {:?}", e);
-                    }
-                    None => {
-                        log::debug!("None");
+                        Destination::Adjacent(channel) => {
+                            log::debug!("Forward to Adjacent");
+                            log::debug!("Forwarding Data:     {:?}", data);
+                            let (tx, rx) = oneshot::channel();
+                            channel.send((data, tx)).await.unwrap();
+                            let data = rx.await.unwrap();
+                            send_stream.send(data).await.expect("stream should be open");
+                        }
+                        Destination::Local => match req {
+                            KVRequestType::Get(key) => {
+                                log::debug!("Serve Local");
+                                log::debug!(
+                                    "checked connection: {}µs",
+                                    Instant::now().duration_since(start).as_micros()
+                                );
+                                let res_data = storage.get(&key).unwrap();
+                                log::debug!(
+                                    "fetched: {}µs",
+                                    Instant::now().duration_since(start).as_micros()
+                                );
+                                let res = net::encode_response(KVResponseType::Result(res_data));
+                                log::debug!(
+                                    "encoded: {}µs",
+                                    Instant::now().duration_since(start).as_micros()
+                                );
+                                send_stream.send(res).await.expect("stream should be open");
+                                log::debug!(
+                                    "sent: {}µs",
+                                    Instant::now().duration_since(start).as_micros()
+                                );
+                            }
+                            KVRequestType::Put(key, value) => {
+                                storage.put(&key, &value).unwrap();
+                                let res = net::encode_response(KVResponseType::Ok);
+                                send_stream.send(res).await.expect("stream should be open");
+                            }
+                        },
                     }
                 }
             }

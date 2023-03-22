@@ -1,4 +1,5 @@
-use s2n_quic::{client::Connect, stream::BidirectionalStream, Client, Connection};
+use net::{decode_response, encode_request, KVRequestType, KVResponseType, ProtoReader};
+use s2n_quic::{client::Connect, stream::BidirectionalStream, Client};
 use std::{error::Error, net::SocketAddr, sync::Arc};
 use tokio::{sync::Mutex, time::Instant};
 
@@ -8,8 +9,7 @@ pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/.
 #[derive(Clone)]
 pub struct DistKVClient {
     stream: Arc<Mutex<BidirectionalStream>>,
-    // client: Client,
-    // connection: Connection,
+    proto_reader: Arc<Mutex<ProtoReader>>,
 }
 
 impl DistKVClient {
@@ -28,42 +28,54 @@ impl DistKVClient {
 
         // open a new stream and split the receiving and sending sides
         let stream = connection.open_bidirectional_stream().await?;
-        // Ok(Self { stream })
-        // Ok(Self { connection })
         Ok(Self {
             stream: Arc::new(Mutex::new(stream)),
+            proto_reader: Arc::new(Mutex::new(ProtoReader::new())),
         })
     }
 
-    pub async fn request(
-        &mut self,
-        req: net::KVRequestType,
-    ) -> Result<net::KVResponseType, Box<dyn Error>> {
+    pub async fn request(&mut self, req: KVRequestType) -> Result<KVResponseType, Box<dyn Error>> {
         let start = Instant::now();
-        let encoded = net::encode_request(req);
-        println!("Encoded Data: {:?}", encoded);
-        println!(
+        let encoded = encode_request(req);
+        log::debug!("Encoded Data: {:?}", encoded);
+        log::debug!(
             "encoded: {}µs",
             Instant::now().duration_since(start).as_micros()
         );
         self.stream.lock().await.send(encoded).await.unwrap();
-        println!(
+        log::debug!(
             "sent: {}µs",
             Instant::now().duration_since(start).as_micros()
         );
-        if let Some(data) = self.stream.lock().await.receive().await.unwrap() {
-            println!(
-                "received: {}µs",
-                Instant::now().duration_since(start).as_micros()
-            );
-            let decoded = net::decode_response(data.as_ref()).unwrap();
-            println!(
-                "decoded: {}µs",
-                Instant::now().duration_since(start).as_micros()
-            );
-            Ok(decoded)
-        } else {
-            Ok(net::KVResponseType::Error("No Response".to_string()))
+        let mut stream = self.stream.lock().await;
+        let mut proto_reader = self.proto_reader.lock().await;
+
+        loop {
+            match stream.receive().await.unwrap() {
+                Some(data) => {
+                    proto_reader.add_data(data);
+                    match proto_reader.read_message() {
+                        Some(data) => {
+                            log::debug!(
+                                "received: {}µs",
+                                Instant::now().duration_since(start).as_micros()
+                            );
+                            let decoded = decode_response(data.as_ref()).unwrap();
+                            log::debug!(
+                                "decoded: {}µs",
+                                Instant::now().duration_since(start).as_micros()
+                            );
+                            return Ok(decoded);
+                        }
+                        None => {
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    return Ok(KVResponseType::Error("No Response".to_string()));
+                }
+            }
         }
     }
 }
