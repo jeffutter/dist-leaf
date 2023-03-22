@@ -1,15 +1,22 @@
 use bytes::Bytes;
 use consistent_hash_ring::{Ring, RingBuilder};
 use env_logger::Env;
+use futures::StreamExt;
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
-use net::{KVRequestType, KVResponseType};
-use s2n_quic::{client::Connect, connection, stream::BidirectionalStream, Client, Server};
+use net::{KVRequestType, KVResponseType, ProtoReader};
+use s2n_quic::{
+    client::Connect,
+    connection,
+    stream::{BidirectionalStream, ReceiveStream},
+    Client, Server,
+};
 use std::{
     collections::HashMap,
     error::Error,
     future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
+    task::Poll,
     thread,
     time::Duration,
 };
@@ -287,12 +294,23 @@ impl VNode {
         storage: db::Database,
     ) -> impl Future<Output = ()> {
         async move {
-            let (mut receive_stream, mut send_stream) = stream.split();
-            let mut data_stream = net::ProtoReader::new();
+            let (receive_stream, mut send_stream) = stream.split();
+            let mut data_stream = DataStream::new(receive_stream);
 
-            while let Some(data) = receive_stream.receive().await.unwrap() {
-                data_stream.add_data(data);
-                if let Some(data) = data_stream.read_message() {
+            let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
+                mpsc::channel(100);
+
+            tokio::spawn(async move {
+                while let Some(data) = send_rx.recv().await {
+                    send_stream.send(data).await.unwrap();
+                }
+            });
+
+            while let Some(Ok(data)) = data_stream.next().await {
+                let storage = storage.clone();
+                let connections = connections.clone();
+                let send_tx = send_tx.clone();
+                tokio::spawn(async move {
                     let start = Instant::now();
                     log::debug!("Received Data: {:?}", data);
                     let req = net::decode_request(data.as_ref()).unwrap();
@@ -307,7 +325,7 @@ impl VNode {
                             log::debug!("Forwarding Data:     {:?}", data);
                             connection.send(data).await.unwrap();
                             let data = connection.recv().await.unwrap().unwrap();
-                            send_stream.send(data).await.expect("stream should be open");
+                            send_tx.send(data).await.expect("stream should be open");
                         }
                         Destination::Adjacent(channel) => {
                             log::debug!("Forward to Adjacent");
@@ -315,7 +333,7 @@ impl VNode {
                             let (tx, rx) = oneshot::channel();
                             channel.send((data, tx)).await.unwrap();
                             let data = rx.await.unwrap();
-                            send_stream.send(data).await.expect("stream should be open");
+                            send_tx.send(data).await.expect("stream should be open");
                         }
                         Destination::Local => match req {
                             KVRequestType::Get(key) => {
@@ -334,7 +352,7 @@ impl VNode {
                                     "encoded: {}µs",
                                     Instant::now().duration_since(start).as_micros()
                                 );
-                                send_stream.send(res).await.expect("stream should be open");
+                                send_tx.send(res).await.expect("stream should be open");
                                 log::debug!(
                                     "sent: {}µs",
                                     Instant::now().duration_since(start).as_micros()
@@ -343,11 +361,11 @@ impl VNode {
                             KVRequestType::Put(key, value) => {
                                 storage.put(&key, &value).unwrap();
                                 let res = net::encode_response(KVResponseType::Ok);
-                                send_stream.send(res).await.expect("stream should be open");
+                                send_tx.send(res).await.expect("stream should be open");
                             }
                         },
                     }
-                }
+                });
             }
         }
     }
@@ -430,6 +448,44 @@ impl VNode {
                     }
 
                 }
+            }
+        }
+    }
+}
+
+struct DataStream {
+    stream: ReceiveStream,
+    proto_reader: ProtoReader,
+}
+
+impl DataStream {
+    fn new(stream: ReceiveStream) -> Self {
+        Self {
+            stream,
+            proto_reader: ProtoReader::new(),
+        }
+    }
+}
+
+impl futures::stream::Stream for DataStream {
+    type Item = Result<Bytes, s2n_quic::stream::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match futures::ready!(self.stream.poll_receive(cx)) {
+            Ok(Some(data)) => {
+                self.proto_reader.add_data(data);
+                match self.proto_reader.read_message() {
+                    Some(bytes) => Poll::Ready(Some(Ok(bytes))),
+                    None => self.poll_next(cx),
+                }
+            }
+            Ok(None) => Poll::Ready(None),
+            Err(e) => {
+                log::debug!("Stream: Error");
+                Poll::Ready(Some(Err(e)))
             }
         }
     }
