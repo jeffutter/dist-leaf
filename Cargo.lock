@@ -1113,8 +1113,11 @@ dependencies = [
 name = "quic-client"
 version = "0.1.0"
 dependencies = [
+ "env_logger",
+ "futures",
  "log",
  "net",
+ "quic-transport",
  "s2n-quic",
  "tokio",
 ]

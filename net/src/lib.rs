@@ -63,13 +63,16 @@ impl ProtoReader {
 pub fn encode_request(request: KVRequestType) -> Bytes {
     let mut message = ::capnp::message::Builder::new_default();
 
-    let res = message.init_root::<net_capnp::request::Builder>();
+    let mut res = message.init_root::<net_capnp::request::Builder>();
 
     match request {
-        KVRequestType::Get(key) => {
-            res.init_get().set_key(&key);
+        KVRequestType::Get { id, key } => {
+            res.set_id(id);
+            let mut get = res.init_get();
+            get.set_key(&key);
         }
-        KVRequestType::Put(key, value) => {
+        KVRequestType::Put { id, key, value } => {
+            res.set_id(id);
             let mut put = res.init_put();
             put.set_key(&key);
             put.set_value(&value);
@@ -89,19 +92,26 @@ pub fn encode_request(request: KVRequestType) -> Bytes {
 pub fn encode_response(response: KVResponseType) -> Bytes {
     let mut message = ::capnp::message::Builder::new_default();
 
-    let res = message.init_root::<net_capnp::response::Builder>();
+    let mut res = message.init_root::<net_capnp::response::Builder>();
 
     match response {
-        KVResponseType::Error(e) => {
-            res.init_error().set_message(&e);
+        KVResponseType::Error { id, error } => {
+            res.set_id(id);
+            res.init_error().set_message(&error);
         }
-        KVResponseType::Result(Some(x)) => {
+        KVResponseType::Result {
+            id,
+            result: Some(x),
+        } => {
+            res.set_id(id);
             res.init_result().set_value(&x);
         }
-        KVResponseType::Result(None) => {
+        KVResponseType::Result { id, result: None } => {
+            res.set_id(id);
             res.init_result();
         }
-        KVResponseType::Ok => {
+        KVResponseType::Ok(id) => {
+            res.set_id(id);
             res.init_ok();
         }
     }
@@ -124,6 +134,8 @@ pub fn decode_request(buf: &[u8]) -> Result<KVRequestType, KVServerError> {
         .get_root::<net_capnp::request::Reader>()
         .unwrap();
 
+    let id = request.get_id();
+
     match request.which().map_err(|_e| KVServerError::Unknown)? {
         net_capnp::request::Which::Get(get_request) => {
             let key = get_request
@@ -131,7 +143,7 @@ pub fn decode_request(buf: &[u8]) -> Result<KVRequestType, KVServerError> {
                 .map_err(|_e| KVServerError::Unknown)?
                 .to_string();
 
-            Ok(KVRequestType::Get(key))
+            Ok(KVRequestType::Get { id, key })
         }
         net_capnp::request::Which::Put(put_request) => {
             let key = put_request
@@ -144,7 +156,7 @@ pub fn decode_request(buf: &[u8]) -> Result<KVRequestType, KVServerError> {
                 .map_err(|_e| KVServerError::Unknown)?
                 .to_string();
 
-            Ok(KVRequestType::Put(key, value))
+            Ok(KVRequestType::Put { id, key, value })
         }
     }
 }
@@ -157,6 +169,8 @@ pub fn decode_response(buf: &[u8]) -> Result<KVResponseType, KVServerError> {
         .get_root::<net_capnp::response::Reader>()
         .unwrap();
 
+    let id = response.get_id();
+
     match response.which().map_err(|_e| KVServerError::Unknown)? {
         net_capnp::response::Which::Result(result) => {
             let value = result
@@ -165,15 +179,18 @@ pub fn decode_response(buf: &[u8]) -> Result<KVResponseType, KVServerError> {
                 .to_string();
 
             // Null Result?
-            Ok(KVResponseType::Result(Some(value)))
+            Ok(KVResponseType::Result {
+                id,
+                result: Some(value),
+            })
         }
-        net_capnp::response::Which::Ok(_) => Ok(KVResponseType::Ok),
+        net_capnp::response::Which::Ok(_) => Ok(KVResponseType::Ok(id)),
         net_capnp::response::Which::Error(result) => {
             let error = result
                 .get_message()
                 .map_err(|_e| KVServerError::Unknown)?
                 .to_string();
-            Ok(KVResponseType::Error(error))
+            Ok(KVResponseType::Error { id, error })
         }
     }
 }
@@ -190,22 +207,32 @@ pub enum KVServerError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KVRequestType {
-    Get(String),
-    Put(String, String),
+    Get { id: u64, key: String },
+    Put { id: u64, key: String, value: String },
 }
 
 impl KVRequestType {
     pub fn key(&self) -> &String {
         match self {
-            KVRequestType::Get(key) => key,
-            KVRequestType::Put(key, _) => key,
+            KVRequestType::Get { key, .. } => key,
+            KVRequestType::Put { key, .. } => key,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KVResponseType {
-    Error(String),
-    Result(Option<String>),
-    Ok,
+    Error { id: u64, error: String },
+    Result { id: u64, result: Option<String> },
+    Ok(u64),
+}
+
+impl KVResponseType {
+    pub fn id(&self) -> &u64 {
+        match self {
+            KVResponseType::Error { id, .. } => id,
+            KVResponseType::Result { id, .. } => id,
+            KVResponseType::Ok(id) => id,
+        }
+    }
 }

@@ -330,7 +330,7 @@ impl VNode {
                             send_tx.send(data).await.expect("stream should be open");
                         }
                         Destination::Local => match req {
-                            KVRequestType::Get(key) => {
+                            KVRequestType::Get { id, key } => {
                                 log::debug!("Serve Local");
                                 log::debug!(
                                     "checked connection: {}µs",
@@ -341,7 +341,10 @@ impl VNode {
                                     "fetched: {}µs",
                                     Instant::now().duration_since(start).as_micros()
                                 );
-                                let res = net::encode_response(KVResponseType::Result(res_data));
+                                let res = net::encode_response(KVResponseType::Result {
+                                    id,
+                                    result: res_data,
+                                });
                                 log::debug!(
                                     "encoded: {}µs",
                                     Instant::now().duration_since(start).as_micros()
@@ -352,9 +355,9 @@ impl VNode {
                                     Instant::now().duration_since(start).as_micros()
                                 );
                             }
-                            KVRequestType::Put(key, value) => {
+                            KVRequestType::Put { id, key, value } => {
                                 storage.put(&key, &value).unwrap();
-                                let res = net::encode_response(KVResponseType::Ok);
+                                let res = net::encode_response(KVResponseType::Ok(id));
                                 send_tx.send(res).await.expect("stream should be open");
                             }
                         },
@@ -412,7 +415,7 @@ impl VNode {
                         Instant::now().duration_since(start).as_micros()
                     );
                     match req {
-                        KVRequestType::Get(key) => {
+                        KVRequestType::Get{id, key} => {
                             log::debug!("Serve Local");
                             log::debug!(
                                 "checked connection: {}µs",
@@ -423,7 +426,7 @@ impl VNode {
                                 "fetched: {}µs",
                                 Instant::now().duration_since(start).as_micros()
                             );
-                            let res = net::encode_response(KVResponseType::Result(res_data));
+                            let res = net::encode_response(KVResponseType::Result{id, result: res_data});
                             log::debug!(
                                 "encoded: {}µs",
                                 Instant::now().duration_since(start).as_micros()
@@ -434,9 +437,9 @@ impl VNode {
                                 Instant::now().duration_since(start).as_micros()
                             );
                         }
-                        KVRequestType::Put(key, value) => {
+                        KVRequestType::Put{id, key, value} => {
                             storage.put(&key, &value).unwrap();
-                            let res = net::encode_response(KVResponseType::Ok);
+                            let res = net::encode_response(KVResponseType::Ok(id));
                             tx.send(res).unwrap();
                         }
                     }
@@ -455,7 +458,7 @@ enum Destination<'a> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     let local_ip = match local_ip_address::local_ip()? {
         std::net::IpAddr::V4(ip) => ip,

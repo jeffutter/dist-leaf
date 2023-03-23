@@ -1,18 +1,26 @@
-use net::{decode_response, encode_request, KVRequestType, KVResponseType, ProtoReader};
-use s2n_quic::{client::Connect, stream::BidirectionalStream, Client};
-use std::{error::Error, net::SocketAddr, sync::Arc};
-use tokio::{sync::Mutex, time::Instant};
+use futures::StreamExt;
+use net::{encode_request, KVRequestType, KVResponseType};
+use quic_transport::ResponseStream;
+use s2n_quic::{client::Connect, stream::SendStream, Client, Connection};
+use std::{
+    collections::HashMap,
+    error::Error,
+    net::SocketAddr,
+    sync::{atomic::AtomicU64, Arc},
+};
+use tokio::{
+    sync::{oneshot, Mutex},
+    time::Instant,
+};
 
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/cert.pem"));
 
-#[derive(Clone)]
-pub struct DistKVClient {
-    stream: Arc<Mutex<BidirectionalStream>>,
-    proto_reader: Arc<Mutex<ProtoReader>>,
+pub struct DistKVConnection {
+    connection: Arc<Mutex<Connection>>,
 }
 
-impl DistKVClient {
+impl DistKVConnection {
     pub async fn new(port: &str) -> Result<Self, Box<dyn Error>> {
         let client = Client::builder()
             .with_tls(CERT_PEM)?
@@ -25,57 +33,101 @@ impl DistKVClient {
 
         // ensure the connection doesn't time out with inactivity
         connection.keep_alive(true)?;
-
-        // open a new stream and split the receiving and sending sides
-        let stream = connection.open_bidirectional_stream().await?;
         Ok(Self {
-            stream: Arc::new(Mutex::new(stream)),
-            proto_reader: Arc::new(Mutex::new(ProtoReader::new())),
+            connection: Arc::new(Mutex::new(connection)),
         })
     }
 
-    pub async fn request(&mut self, req: KVRequestType) -> Result<KVResponseType, Box<dyn Error>> {
+    pub async fn client(&self) -> Result<DistKVClient, Box<dyn Error>> {
+        DistKVClient::new(self.connection.clone()).await
+    }
+}
+
+pub struct DistKVClient {
+    pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<KVResponseType>>>>,
+    request_counter: AtomicU64,
+    send_stream: SendStream,
+}
+
+impl DistKVClient {
+    async fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, Box<dyn Error>> {
+        // open a new stream and split the receiving and sending sides
+        let stream = connection.lock().await.open_bidirectional_stream().await?;
+        let (receive_stream, send_stream) = stream.split();
+
+        let pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<KVResponseType>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let pending_requests1 = pending_requests.clone();
+        tokio::spawn(async move {
+            let mut response_stream: ResponseStream = receive_stream.into();
+            while let Some(Ok((req, _data))) = response_stream.next().await {
+                let tx = pending_requests1.lock().await.remove(req.id()).unwrap();
+                tx.send(req).unwrap();
+            }
+        });
+
+        Ok(Self {
+            send_stream,
+            pending_requests,
+
+            request_counter: AtomicU64::new(0),
+        })
+    }
+
+    pub async fn request(&mut self, req: KVRequest) -> Result<KVResponseType, Box<dyn Error>> {
         let start = Instant::now();
-        let encoded = encode_request(req);
+        let id = self
+            .request_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let encoded = encode_request(KVRequestWithId::new(id, req).into());
         log::debug!("Encoded Data: {:?}", encoded);
         log::debug!(
             "encoded: {}µs",
             Instant::now().duration_since(start).as_micros()
         );
-        self.stream.lock().await.send(encoded).await.unwrap();
+        self.send_stream.send(encoded).await.unwrap();
+        let (tx, rx) = oneshot::channel();
+        self.pending_requests.lock().await.insert(id, tx);
         log::debug!(
             "sent: {}µs",
             Instant::now().duration_since(start).as_micros()
         );
-        let mut stream = self.stream.lock().await;
-        let mut proto_reader = self.proto_reader.lock().await;
+        let result = rx.await?;
+        log::debug!(
+            "received: {}µs",
+            Instant::now().duration_since(start).as_micros()
+        );
+        Ok(result)
+    }
+}
 
-        loop {
-            match stream.receive().await.unwrap() {
-                Some(data) => {
-                    proto_reader.add_data(data);
-                    match proto_reader.read_message() {
-                        Some(data) => {
-                            log::debug!(
-                                "received: {}µs",
-                                Instant::now().duration_since(start).as_micros()
-                            );
-                            let decoded = decode_response(data.as_ref()).unwrap();
-                            log::debug!(
-                                "decoded: {}µs",
-                                Instant::now().duration_since(start).as_micros()
-                            );
-                            return Ok(decoded);
-                        }
-                        None => {
-                            continue;
-                        }
-                    }
-                }
-                None => {
-                    return Ok(KVResponseType::Error("No Response".to_string()));
-                }
-            }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KVRequest {
+    Get { key: String },
+    Put { key: String, value: String },
+}
+
+struct KVRequestWithId {
+    id: u64,
+    kv_request: KVRequest,
+}
+
+impl KVRequestWithId {
+    fn new(id: u64, kv_request: KVRequest) -> Self {
+        Self { id, kv_request }
+    }
+}
+
+impl Into<KVRequestType> for KVRequestWithId {
+    fn into(self) -> KVRequestType {
+        match self.kv_request {
+            KVRequest::Get { key } => KVRequestType::Get { id: self.id, key },
+            KVRequest::Put { key, value } => KVRequestType::Put {
+                id: self.id,
+                key,
+                value,
+            },
         }
     }
 }

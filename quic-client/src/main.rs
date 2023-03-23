@@ -1,17 +1,20 @@
-use quic_client::DistKVClient;
+use env_logger::Env;
+use quic_client::{DistKVConnection, KVRequest};
 use std::{error::Error, thread};
 use tokio::sync::mpsc::channel;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+
     let args: Vec<String> = std::env::args().collect();
     let port = args.get(1).unwrap();
 
-    let mut client = DistKVClient::new(port).await?;
+    let mut client = DistKVConnection::new(port).await?.client().await?;
 
     println!("Client Ready");
 
-    let (tx, mut rx) = channel::<net::KVRequestType>(1);
+    let (tx, mut rx) = channel::<KVRequest>(1);
 
     let cli = thread::spawn(move || {
         std::io::stdin()
@@ -40,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn handle_input_line(line: String) -> Option<net::KVRequestType> {
+fn handle_input_line(line: String) -> Option<KVRequest> {
     let mut args = line.split(' ');
 
     let next = args.next().map(|x| x.to_uppercase());
@@ -56,7 +59,9 @@ fn handle_input_line(line: String) -> Option<net::KVRequestType> {
                     }
                 }
             };
-            Some(net::KVRequestType::Get(key.to_string()))
+            Some(KVRequest::Get {
+                key: key.to_string(),
+            })
         }
         Some("PUT") => {
             let key = {
@@ -78,7 +83,10 @@ fn handle_input_line(line: String) -> Option<net::KVRequestType> {
                 }
             };
 
-            Some(net::KVRequestType::Put(key.to_string(), value.to_string()))
+            Some(KVRequest::Put {
+                key: key.to_string(),
+                value: value.to_string(),
+            })
         }
         _ => {
             println!("expected GET, PUT");

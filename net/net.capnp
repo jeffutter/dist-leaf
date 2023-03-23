@@ -1,27 +1,31 @@
 @0xdca578873284febb;
 
 struct Request {
+  id @0 :UInt64;
+
   union {
     get :group {
-      key @0 :Text;
+      key @1 :Text;
     }
     put :group {
-      key @1 :Text;
-      value @2 :Text;
+      key @2 :Text;
+      value @3 :Text;
     }
   }
 }
 
 struct Response {
+  id @0 :UInt64;
+
   union {
     result :group {
-      value @0 :Text;
+      value @1 :Text;
     }
     ok :group {
-      ok @1 :Void;
+      ok @2 :Void;
     }
     error :group {
-      message @2 :Text;
+      message @3 :Text;
     }
   }
 }
