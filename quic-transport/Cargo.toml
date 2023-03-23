@@ -1,0 +1,14 @@
+[package]
+name = "quic-transport"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+s2n-quic = "1"
+net = { path = "../net" }
+futures = "0.3"
+log = "0.4"
+thiserror = "1"
+bytes = "1"

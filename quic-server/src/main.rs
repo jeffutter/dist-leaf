@@ -3,20 +3,15 @@ use consistent_hash_ring::{Ring, RingBuilder};
 use env_logger::Env;
 use futures::StreamExt;
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
-use net::{KVRequestType, KVResponseType, ProtoReader};
-use s2n_quic::{
-    client::Connect,
-    connection,
-    stream::{BidirectionalStream, ReceiveStream},
-    Client, Server,
-};
+use net::{KVRequestType, KVResponseType};
+use quic_transport::{DataStream, RequestStream};
+use s2n_quic::{client::Connect, connection, stream::BidirectionalStream, Client, Server};
 use std::{
     collections::HashMap,
     error::Error,
     future::Future,
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
-    task::Poll,
     thread,
     time::Duration,
 };
@@ -141,8 +136,12 @@ impl S2SConnections {
 
 #[derive(Error, Debug)]
 pub enum ServerError {
+    #[error("decoding error")]
+    Decoding(#[from] net::KVServerError),
     #[error("connection error")]
     Connection(#[from] s2n_quic::connection::Error),
+    #[error("stream error")]
+    Stream(#[from] s2n_quic::stream::Error),
     #[error("unknown server error")]
     Unknown,
 }
@@ -295,7 +294,8 @@ impl VNode {
     ) -> impl Future<Output = ()> {
         async move {
             let (receive_stream, mut send_stream) = stream.split();
-            let mut data_stream = DataStream::new(receive_stream);
+            let data_stream = DataStream::new(receive_stream);
+            let mut request_stream = RequestStream::new(data_stream);
 
             let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
                 mpsc::channel(100);
@@ -306,23 +306,17 @@ impl VNode {
                 }
             });
 
-            while let Some(Ok(data)) = data_stream.next().await {
+            while let Some(Ok((req, data))) = request_stream.next().await {
                 let storage = storage.clone();
                 let connections = connections.clone();
                 let send_tx = send_tx.clone();
                 tokio::spawn(async move {
                     let start = Instant::now();
-                    log::debug!("Received Data: {:?}", data);
-                    let req = net::decode_request(data.as_ref()).unwrap();
-                    log::debug!(
-                        "decoded: {}µs",
-                        Instant::now().duration_since(start).as_micros()
-                    );
 
                     match connections.lock().await.get(req.key()) {
                         Destination::Remote(connection) => {
                             log::debug!("Forward to: {:?}", connection);
-                            log::debug!("Forwarding Data:     {:?}", data);
+                            log::debug!("Forwarding Data:     {:?}", req);
                             connection.send(data).await.unwrap();
                             let data = connection.recv().await.unwrap().unwrap();
                             send_tx.send(data).await.expect("stream should be open");
@@ -448,44 +442,6 @@ impl VNode {
                     }
 
                 }
-            }
-        }
-    }
-}
-
-struct DataStream {
-    stream: ReceiveStream,
-    proto_reader: ProtoReader,
-}
-
-impl DataStream {
-    fn new(stream: ReceiveStream) -> Self {
-        Self {
-            stream,
-            proto_reader: ProtoReader::new(),
-        }
-    }
-}
-
-impl futures::stream::Stream for DataStream {
-    type Item = Result<Bytes, s2n_quic::stream::Error>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        match futures::ready!(self.stream.poll_receive(cx)) {
-            Ok(Some(data)) => {
-                self.proto_reader.add_data(data);
-                match self.proto_reader.read_message() {
-                    Some(bytes) => Poll::Ready(Some(Ok(bytes))),
-                    None => self.poll_next(cx),
-                }
-            }
-            Ok(None) => Poll::Ready(None),
-            Err(e) => {
-                log::debug!("Stream: Error");
-                Poll::Ready(Some(Err(e)))
             }
         }
     }

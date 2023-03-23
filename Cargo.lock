@@ -1133,12 +1133,25 @@ dependencies = [
  "log",
  "mdns-sd",
  "net",
+ "quic-transport",
  "rand 0.8.5",
  "s2n-quic",
  "thiserror",
  "tokio",
  "tokio-util",
  "uuid",
+]
+
+[[package]]
+name = "quic-transport"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "log",
+ "net",
+ "s2n-quic",
+ "thiserror",
 ]
 
 [[package]]
