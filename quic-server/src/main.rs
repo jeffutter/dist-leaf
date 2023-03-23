@@ -143,6 +143,8 @@ pub enum ServerError {
     Stream(#[from] s2n_quic::stream::Error),
     #[error("unknown server error")]
     Unknown,
+    #[error("initialization error: {}", .0)]
+    Initialization(String),
 }
 
 struct VNode {
@@ -160,22 +162,31 @@ impl VNode {
         local_ip: Ipv4Addr,
         rx: mpsc::Receiver<(Bytes, oneshot::Sender<Bytes>)>,
         vnode_to_tx: HashMap<VNodeId, mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>>,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, ServerError> {
         let vnode_id = VNodeId::new(node_id, core_id);
 
         let server = Server::builder()
-            .with_tls((CERT_PEM, KEY_PEM))?
-            .with_io("0.0.0.0:0")?
-            .start()?;
+            .with_tls((CERT_PEM, KEY_PEM))
+            .map_err(|e| ServerError::Initialization(e.to_string()))?
+            .with_io("0.0.0.0:0")
+            .map_err(|e| ServerError::Initialization(e.to_string()))?
+            .start()
+            .map_err(|e| ServerError::Initialization(e.to_string()))?;
 
         // node-id and core-id is too long
-        let port = server.local_addr()?.port();
+        let port = server
+            .local_addr()
+            .map_err(|e| ServerError::Initialization(e.to_string()))?
+            .port();
         log::info!("Starting Server on Port: {}", port);
 
         let client = Client::builder()
-            .with_tls(CERT_PEM)?
-            .with_io("0.0.0.0:0")?
-            .start()?;
+            .with_tls(CERT_PEM)
+            .map_err(|e| ServerError::Initialization(e.to_string()))?
+            .with_io("0.0.0.0:0")
+            .map_err(|e| ServerError::Initialization(e.to_string()))?
+            .start()
+            .map_err(|e| ServerError::Initialization(e.to_string()))?;
 
         let mut connections = S2SConnections::new(client, vnode_id);
         for (vnode_id, tx) in vnode_to_tx {
@@ -293,10 +304,8 @@ impl VNode {
         }
     }
 
-    async fn run(&mut self) -> Result<(), Box<dyn Error>> {
+    async fn run(&mut self) -> Result<(), ServerError> {
         let storage = self.storage.clone();
-
-        let _ = self.mdns.spawn();
 
         loop {
             select! {
@@ -406,10 +415,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .unwrap();
                     log::info!("Starting Thread: #{:?}", id);
                     rt.block_on(async {
-                        let mut vnode =
-                            VNode::new(node_id, core_id, local_ip, rx, core_to_tx).unwrap();
+                        let mut vnode = VNode::new(node_id, core_id, local_ip, rx, core_to_tx)?;
 
-                        vnode.run().await.unwrap();
+                        let _ = vnode.mdns.spawn();
+                        vnode.run().await?;
+
                         Ok::<(), ServerError>(())
                     })
                     .unwrap();
