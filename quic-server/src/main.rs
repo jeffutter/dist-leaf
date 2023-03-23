@@ -1,8 +1,9 @@
+mod mdns;
+
 use bytes::Bytes;
 use consistent_hash_ring::{Ring, RingBuilder};
 use env_logger::Env;
 use futures::StreamExt;
-use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 use net::{KVRequestType, KVResponseType};
 use quic_transport::{DataStream, RequestStream};
 use s2n_quic::{client::Connect, connection, stream::BidirectionalStream, Client, Server};
@@ -13,14 +14,12 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     thread,
-    time::Duration,
 };
 use thiserror::Error;
 use tokio::{
     runtime, select,
     sync::{mpsc, oneshot, Mutex},
-    task,
-    time::{self, Instant},
+    time::Instant,
 };
 use uuid::Uuid;
 
@@ -149,8 +148,7 @@ pub enum ServerError {
 struct VNode {
     connections: Arc<Mutex<S2SConnections>>,
     storage: db::Database,
-    socket_addr: SocketAddr,
-    mdns_receiver: Receiver<ServiceEvent>,
+    mdns: mdns::MDNS,
     server: s2n_quic::Server,
     rx: mpsc::Receiver<(Bytes, oneshot::Sender<Bytes>)>,
 }
@@ -164,10 +162,6 @@ impl VNode {
         vnode_to_tx: HashMap<VNodeId, mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>>,
     ) -> Result<Self, Box<dyn Error>> {
         let vnode_id = VNodeId::new(node_id, core_id);
-        let mdns = ServiceDaemon::new().expect("Failed to create daemon");
-
-        let service_type = "_mdns-quic-db._udp.local.";
-        let receiver = mdns.browse(service_type).expect("Failed to browse");
 
         let server = Server::builder()
             .with_tls((CERT_PEM, KEY_PEM))?
@@ -175,36 +169,8 @@ impl VNode {
             .start()?;
 
         // node-id and core-id is too long
-        let instance_name = format!("node-{}", core_id);
-        let host_ipv4: Ipv4Addr = local_ip;
-        let host_name = format!("{}.local.", host_ipv4);
         let port = server.local_addr()?.port();
         log::info!("Starting Server on Port: {}", port);
-        let properties = [
-            ("node_id".to_string(), node_id.to_string()),
-            ("core_id".to_string(), core_id.to_string()),
-        ];
-        log::debug!("Properties: {:?}", properties);
-        let my_service = ServiceInfo::new(
-            service_type,
-            &instance_name,
-            &host_name,
-            host_ipv4,
-            port,
-            &properties[..],
-        )
-        .unwrap();
-
-        mdns.register(my_service.clone())
-            .expect("Failed to register our service");
-
-        let socket_addr: SocketAddr = format!(
-            "{}:{}",
-            my_service.get_addresses().iter().next().unwrap(),
-            my_service.get_port()
-        )
-        .parse()
-        .unwrap();
 
         let client = Client::builder()
             .with_tls(CERT_PEM)?
@@ -218,73 +184,15 @@ impl VNode {
         let connections = Arc::new(Mutex::new(connections));
         let storage = db::Database::new_tmp();
 
+        let mdns = mdns::MDNS::new(node_id, core_id, connections.clone(), local_ip, port);
+
         Ok(Self {
             connections,
             storage,
-            socket_addr,
             server,
-            mdns_receiver: receiver,
+            mdns,
             rx,
         })
-    }
-
-    fn mdns_loop(
-        connections: Arc<Mutex<S2SConnections>>,
-        local_socket_addr: SocketAddr,
-        mdns_receiver: Receiver<ServiceEvent>,
-    ) -> impl Future<Output = Result<(), ServerError>> {
-        async move {
-            let mut interval = time::interval(Duration::from_secs(30));
-
-            loop {
-                interval.tick().await;
-                while let Ok(event) = mdns_receiver.recv_async().await {
-                    match event {
-                        ServiceEvent::ServiceResolved(info) => {
-                            let node_id: Uuid = info
-                                .get_property_val_str("node_id")
-                                .unwrap()
-                                .parse()
-                                .unwrap();
-                            let core_id: Uuid = info
-                                .get_property_val_str("core_id")
-                                .unwrap()
-                                .parse()
-                                .unwrap();
-                            let vnode_id = VNodeId::new(node_id, core_id);
-
-                            log::debug!(
-                                "Resolved a new service: {} {}",
-                                info.get_fullname(),
-                                info.get_port()
-                            );
-
-                            let socket_addr: SocketAddr = SocketAddr::new(
-                                info.get_addresses()
-                                    .iter()
-                                    .next()
-                                    .unwrap()
-                                    .to_owned()
-                                    .into(),
-                                info.get_port(),
-                            );
-
-                            if socket_addr != local_socket_addr {
-                                connections
-                                    .lock()
-                                    .await
-                                    .add_connection(vnode_id, socket_addr)
-                                    .await?;
-                            }
-                        }
-                        ServiceEvent::SearchStarted(_) => (),
-                        other_event => {
-                            log::debug!("Received other event: {:?}", &other_event);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     fn handle_stream(
@@ -387,14 +295,8 @@ impl VNode {
 
     async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let storage = self.storage.clone();
-        let mdns_receiver = self.mdns_receiver.clone();
-        let local_socket_addr = self.socket_addr;
 
-        let _mdns_search = task::spawn(Self::mdns_loop(
-            self.connections.clone(),
-            local_socket_addr,
-            mdns_receiver,
-        ));
+        let _ = self.mdns.spawn();
 
         loop {
             select! {
