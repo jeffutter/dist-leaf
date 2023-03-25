@@ -1,4 +1,4 @@
-use crate::{Destination, ServerError, VNodeId};
+use crate::{vnode::Destination, ServerError, VNodeId};
 use bytes::Bytes;
 use consistent_hash_ring::{Ring, RingBuilder};
 use s2n_quic::{client::Connect, stream::BidirectionalStream, Client};
