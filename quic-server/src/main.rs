@@ -1,20 +1,14 @@
 mod mdns;
+mod s2s_connection;
 
 use bytes::Bytes;
-use consistent_hash_ring::{Ring, RingBuilder};
 use env_logger::Env;
 use futures::StreamExt;
 use net::{KVRequestType, KVResponseType};
 use quic_transport::{DataStream, RequestStream};
-use s2n_quic::{client::Connect, connection, stream::BidirectionalStream, Client, Server};
-use std::{
-    collections::HashMap,
-    error::Error,
-    future::Future,
-    net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
-    thread,
-};
+use s2n_quic::{connection, stream::BidirectionalStream, Client, Server};
+use s2s_connection::{S2SConnection, S2SConnections};
+use std::{collections::HashMap, error::Error, future::Future, net::Ipv4Addr, sync::Arc, thread};
 use thiserror::Error;
 use tokio::{
     runtime, select,
@@ -37,99 +31,6 @@ struct VNodeId {
 impl VNodeId {
     fn new(node_id: Uuid, core_id: Uuid) -> Self {
         Self { node_id, core_id }
-    }
-}
-
-#[derive(Debug)]
-struct S2SConnection {
-    stream: BidirectionalStream,
-}
-
-impl S2SConnection {
-    async fn new(addr: SocketAddr, client: Client) -> Result<Self, ServerError> {
-        let connect = Connect::new(addr).with_server_name("localhost");
-        let mut connection = client.connect(connect).await?;
-        connection.keep_alive(true)?;
-        let stream = connection.open_bidirectional_stream().await?;
-
-        Ok(Self { stream })
-    }
-
-    async fn send(&mut self, data: Bytes) -> Result<(), Box<dyn Error>> {
-        self.stream.send(data).await?;
-        Ok(())
-    }
-
-    async fn recv(&mut self) -> Result<Option<Bytes>, Box<dyn Error>> {
-        let data = self.stream.receive().await?;
-        Ok(data)
-    }
-}
-
-struct S2SConnections {
-    connections: HashMap<VNodeId, S2SConnection>,
-    channels: HashMap<VNodeId, mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>>,
-    ring: Ring<VNodeId>,
-    client: Client,
-    vnode_id: VNodeId,
-}
-
-impl S2SConnections {
-    fn new(client: Client, vnode_id: VNodeId) -> Self {
-        let mut ring = RingBuilder::default().build();
-        ring.insert(vnode_id.clone());
-
-        Self {
-            connections: HashMap::new(),
-            channels: HashMap::new(),
-            ring,
-            client,
-            vnode_id,
-        }
-    }
-
-    async fn add_connection(
-        &mut self,
-        vnode_id: VNodeId,
-        addr: SocketAddr,
-    ) -> Result<(), ServerError> {
-        if let None = self.connections.get(&vnode_id) {
-            let s2s_connection = S2SConnection::new(addr, self.client.clone()).await?;
-            self.connections.insert(vnode_id.clone(), s2s_connection);
-            self.ring.insert(vnode_id);
-        }
-
-        Ok(())
-    }
-
-    fn add_channel(
-        &mut self,
-        vnode_id: VNodeId,
-        channel: mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>,
-    ) {
-        if let None = self.channels.get(&vnode_id) {
-            self.channels.insert(vnode_id.clone(), channel);
-            self.ring.insert(vnode_id);
-        }
-    }
-
-    fn get(&mut self, key: &str) -> Destination {
-        let vnode_id = self.ring.get(key);
-
-        match vnode_id {
-            vnode_id if vnode_id == &self.vnode_id => Destination::Local,
-            VNodeId {
-                node_id,
-                core_id: _,
-            } if node_id == &self.vnode_id.node_id => {
-                let channel = self.channels.get_mut(vnode_id).unwrap();
-                Destination::Adjacent(channel)
-            }
-            vnode_id => {
-                let connection = self.connections.get_mut(vnode_id).unwrap();
-                Destination::Remote(connection)
-            }
-        }
     }
 }
 
@@ -188,7 +89,7 @@ impl VNode {
             .start()
             .map_err(|e| ServerError::Initialization(e.to_string()))?;
 
-        let mut connections = S2SConnections::new(client, vnode_id);
+        let mut connections = s2s_connection::S2SConnections::new(client, vnode_id);
         for (vnode_id, tx) in vnode_to_tx {
             connections.add_channel(vnode_id, tx)
         }
