@@ -92,6 +92,41 @@ impl VNode {
         })
     }
 
+    async fn handle_local(
+        req: KVRequestType,
+        storage: db::Database,
+        start: Instant,
+    ) -> Result<Bytes, ServerError> {
+        match req {
+            KVRequestType::Get { id, key } => {
+                log::debug!("Serve Local");
+                log::debug!(
+                    "checked connection: {}µs",
+                    Instant::now().duration_since(start).as_micros()
+                );
+                let res_data = storage.get(&key)?;
+                log::debug!(
+                    "fetched: {}µs",
+                    Instant::now().duration_since(start).as_micros()
+                );
+                let res = net::encode_response(KVResponseType::Result {
+                    id,
+                    result: res_data,
+                });
+                log::debug!(
+                    "encoded: {}µs",
+                    Instant::now().duration_since(start).as_micros()
+                );
+                Ok(res)
+            }
+            KVRequestType::Put { id, key, value } => {
+                storage.put(&key, &value)?;
+                let res = net::encode_response(KVResponseType::Ok(id));
+                Ok(res)
+            }
+        }
+    }
+
     fn handle_stream(
         stream: BidirectionalStream,
         connections: Arc<Mutex<S2SConnections>>,
@@ -107,8 +142,10 @@ impl VNode {
 
             tokio::spawn(async move {
                 while let Some(data) = send_rx.recv().await {
-                    send_stream.send(data).await.unwrap();
+                    send_stream.send(data).await?;
                 }
+
+                Ok::<(), ServerError>(())
             });
 
             while let Some(Ok((req, data))) = request_stream.next().await {
@@ -122,51 +159,31 @@ impl VNode {
                         Destination::Remote(connection) => {
                             log::debug!("Forward to: {:?}", connection);
                             log::debug!("Forwarding Data:     {:?}", req);
-                            connection.send(data).await.unwrap();
-                            let data = connection.recv().await.unwrap().unwrap();
+                            connection.send(data).await?;
+                            let data = connection.recv().await?.expect("Missing Data");
                             send_tx.send(data).await.expect("stream should be open");
                         }
                         Destination::Adjacent(channel) => {
                             log::debug!("Forward to Adjacent");
                             log::debug!("Forwarding Data:     {:?}", data);
                             let (tx, rx) = oneshot::channel();
-                            channel.send((data, tx)).await.unwrap();
-                            let data = rx.await.unwrap();
+                            channel
+                                .send((data, tx))
+                                .await
+                                .expect("channel should be open");
+                            let data = rx.await.expect("channel should be open");
                             send_tx.send(data).await.expect("stream should be open");
                         }
-                        Destination::Local => match req {
-                            KVRequestType::Get { id, key } => {
-                                log::debug!("Serve Local");
-                                log::debug!(
-                                    "checked connection: {}µs",
-                                    Instant::now().duration_since(start).as_micros()
-                                );
-                                let res_data = storage.get(&key).unwrap();
-                                log::debug!(
-                                    "fetched: {}µs",
-                                    Instant::now().duration_since(start).as_micros()
-                                );
-                                let res = net::encode_response(KVResponseType::Result {
-                                    id,
-                                    result: res_data,
-                                });
-                                log::debug!(
-                                    "encoded: {}µs",
-                                    Instant::now().duration_since(start).as_micros()
-                                );
-                                send_tx.send(res).await.expect("stream should be open");
-                                log::debug!(
-                                    "sent: {}µs",
-                                    Instant::now().duration_since(start).as_micros()
-                                );
-                            }
-                            KVRequestType::Put { id, key, value } => {
-                                storage.put(&key, &value).unwrap();
-                                let res = net::encode_response(KVResponseType::Ok(id));
-                                send_tx.send(res).await.expect("stream should be open");
-                            }
-                        },
+                        Destination::Local => {
+                            let res = Self::handle_local(req, storage, start).await?;
+                            send_tx.send(res).await.expect("stream should be open");
+                            log::debug!(
+                                "sent: {}µs",
+                                Instant::now().duration_since(start).as_micros()
+                            );
+                        }
                     }
+                    Ok::<(), ServerError>(())
                 });
             }
         }
@@ -194,6 +211,7 @@ impl VNode {
         let storage = self.storage.clone();
 
         loop {
+            let storage = storage.clone();
             select! {
                 Some(connection) = self.server.accept() => {
                     // spawn a new task for the connection
@@ -204,43 +222,19 @@ impl VNode {
                     ));
                 }
                 Some((data, tx)) = self.rx.recv() => {
-                    let start = Instant::now();
-                    log::debug!("Handling Local Data: {:?}", data);
-                    let req = net::decode_request(data.as_ref()).unwrap();
-                    log::debug!(
-                        "decoded: {}µs",
-                        Instant::now().duration_since(start).as_micros()
-                    );
-                    match req {
-                        KVRequestType::Get{id, key} => {
-                            log::debug!("Serve Local");
-                            log::debug!(
-                                "checked connection: {}µs",
-                                Instant::now().duration_since(start).as_micros()
-                            );
-                            let res_data = storage.get(&key).unwrap();
-                            log::debug!(
-                                "fetched: {}µs",
-                                Instant::now().duration_since(start).as_micros()
-                            );
-                            let res = net::encode_response(KVResponseType::Result{id, result: res_data});
-                            log::debug!(
-                                "encoded: {}µs",
-                                Instant::now().duration_since(start).as_micros()
-                            );
-                            tx.send(res).unwrap();
-                            log::debug!(
-                                "sent: {}µs",
-                                Instant::now().duration_since(start).as_micros()
-                            );
-                        }
-                        KVRequestType::Put{id, key, value} => {
-                            storage.put(&key, &value).unwrap();
-                            let res = net::encode_response(KVResponseType::Ok(id));
-                            tx.send(res).unwrap();
-                        }
-                    }
+                    tokio::spawn(async move {
+                        let start = Instant::now();
+                        log::debug!("Handling Local Data: {:?}", data);
+                        let req = net::decode_request(data.as_ref())?;
+                        log::debug!(
+                            "decoded: {}µs",
+                            Instant::now().duration_since(start).as_micros()
+                        );
+                        let res = Self::handle_local(req, storage, start).await?;
+                        tx.send(res).expect("channel should be open");
 
+                        Ok::<(), ServerError>(())
+                    });
                 }
             }
         }

@@ -3,6 +3,7 @@ mod s2s_connection;
 mod vnode;
 
 use bytes::Bytes;
+use db::DatabaseError;
 use env_logger::Env;
 use s2s_connection::S2SConnections;
 use std::{collections::HashMap, error::Error, thread};
@@ -18,6 +19,8 @@ use crate::vnode::VNode;
 
 #[derive(Error, Debug)]
 pub enum ServerError {
+    #[error("database error")]
+    Database(#[from] DatabaseError),
     #[error("decoding error")]
     Decoding(#[from] net::KVServerError),
     #[error("connection error")]
