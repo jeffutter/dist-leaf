@@ -1119,6 +1119,7 @@ dependencies = [
  "net",
  "quic-transport",
  "s2n-quic",
+ "thiserror",
  "tokio",
 ]
 

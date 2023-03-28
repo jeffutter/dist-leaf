@@ -7,9 +7,10 @@ edition = "2021"
 
 [dependencies]
 s2n-quic = "1"
-tokio = { version = "1.26.0", features = ["full"] }
+tokio = { version = "1.26", features = ["full"] }
 log = "0.4"
-net = { path = "../net" }
-quic-transport = { path = "../quic-transport" }
 futures = "0.3"
 env_logger = "0.10"
+thiserror = "1"
+net = { path = "../net" }
+quic-transport = { path = "../quic-transport" }

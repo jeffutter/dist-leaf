@@ -1,6 +1,6 @@
 use env_logger::Env;
-use quic_client::{DistKVConnection, KVRequest};
-use std::{error::Error, thread};
+use quic_client::{DistKVClient, KVRequest};
+use std::{error::Error, net::SocketAddr, thread};
 use tokio::sync::mpsc::channel;
 
 #[tokio::main]
@@ -10,7 +10,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     let port = args.get(1).unwrap();
 
-    let mut client = DistKVConnection::new(port).await?.client().await?;
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let client = DistKVClient::new()?;
+    let connection = client.connect(addr).await?;
+    let mut stream = connection.stream().await?;
 
     println!("Client Ready");
 
@@ -30,7 +33,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         loop {
             if let Some(req) = rx.recv().await {
-                let response = client.request(req).await.unwrap();
+                let response = stream.request(req).await.unwrap();
                 println!("Response: {:?}", response);
             }
         }

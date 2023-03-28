@@ -4,10 +4,10 @@ use quic_transport::ResponseStream;
 use s2n_quic::{client::Connect, stream::SendStream, Client, Connection};
 use std::{
     collections::HashMap,
-    error::Error,
     net::SocketAddr,
     sync::{atomic::AtomicU64, Arc},
 };
+use thiserror::Error;
 use tokio::{
     sync::{oneshot, Mutex},
     time::Instant,
@@ -16,41 +16,70 @@ use tokio::{
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/cert.pem"));
 
+#[derive(Error, Debug)]
+pub enum ClientError {
+    #[error("connection error")]
+    Connection(#[from] s2n_quic::connection::Error),
+    #[error("initialization error: {}", .0)]
+    Initialization(String),
+    #[error("unknown client error")]
+    Unknown,
+}
+
+pub struct DistKVClient {
+    client: Client,
+}
+
+impl DistKVClient {
+    pub fn new() -> Result<Self, ClientError> {
+        let client = Client::builder()
+            .with_tls(CERT_PEM)
+            .map_err(|e| ClientError::Initialization(e.to_string()))?
+            .with_io("0.0.0.0:0")
+            .map_err(|e| ClientError::Initialization(e.to_string()))?
+            .start()
+            .map_err(|e| ClientError::Initialization(e.to_string()))?;
+
+        Ok(Self { client })
+    }
+
+    pub async fn connect(&self, addr: SocketAddr) -> Result<DistKVConnection, ClientError> {
+        let connect = Connect::new(addr).with_server_name("localhost");
+        let mut connection = self.client.connect(connect).await?;
+        // ensure the connection doesn't time out with inactivity
+        connection.keep_alive(true)?;
+
+        let conn = DistKVConnection::new(connection).await;
+
+        Ok(conn)
+    }
+}
+
+#[derive(Debug)]
 pub struct DistKVConnection {
     connection: Arc<Mutex<Connection>>,
 }
 
 impl DistKVConnection {
-    pub async fn new(port: &str) -> Result<Self, Box<dyn Error>> {
-        let client = Client::builder()
-            .with_tls(CERT_PEM)?
-            .with_io("0.0.0.0:0")?
-            .start()?;
-
-        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-        let connect = Connect::new(addr).with_server_name("localhost");
-        let mut connection = client.connect(connect).await?;
-
-        // ensure the connection doesn't time out with inactivity
-        connection.keep_alive(true)?;
-        Ok(Self {
+    pub async fn new(connection: Connection) -> Self {
+        Self {
             connection: Arc::new(Mutex::new(connection)),
-        })
+        }
     }
 
-    pub async fn client(&self) -> Result<DistKVClient, Box<dyn Error>> {
-        DistKVClient::new(self.connection.clone()).await
+    pub async fn stream(&self) -> Result<DistKVStream, ClientError> {
+        DistKVStream::new(self.connection.clone()).await
     }
 }
 
-pub struct DistKVClient {
+pub struct DistKVStream {
     pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<KVResponseType>>>>,
     request_counter: AtomicU64,
     send_stream: SendStream,
 }
 
-impl DistKVClient {
-    async fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, Box<dyn Error>> {
+impl DistKVStream {
+    async fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, ClientError> {
         // open a new stream and split the receiving and sending sides
         let stream = connection.lock().await.open_bidirectional_stream().await?;
         let (receive_stream, send_stream) = stream.split();
@@ -75,7 +104,7 @@ impl DistKVClient {
         })
     }
 
-    pub async fn request(&mut self, req: KVRequest) -> Result<KVResponseType, Box<dyn Error>> {
+    pub async fn request(&mut self, req: KVRequest) -> Result<KVResponseType, ClientError> {
         let start = Instant::now();
         let id = self
             .request_counter
@@ -93,7 +122,7 @@ impl DistKVClient {
             "sent: {}µs",
             Instant::now().duration_since(start).as_micros()
         );
-        let result = rx.await?;
+        let result = rx.await.expect("channel should be open");
         log::debug!(
             "received: {}µs",
             Instant::now().duration_since(start).as_micros()
