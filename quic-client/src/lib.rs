@@ -1,6 +1,6 @@
 mod protocol;
 
-use quic_transport::{Decode, DistKVStream, Encode, RequestWithId, TransportError};
+use quic_transport::{Decode, Encode, QuicMessageClient, RequestWithId, TransportError};
 use s2n_quic::{client::Connect, Client, Connection};
 use std::{marker::PhantomData, net::SocketAddr, sync::Arc};
 use thiserror::Error;
@@ -33,7 +33,11 @@ pub struct DistKVClient<Req, Res> {
 
 impl<Req, Res> DistKVClient<Req, Res>
 where
-    Req: Encode + Decode + std::fmt::Debug + std::convert::From<RequestWithId<Req>>,
+    Req: Encode
+        + Decode<Item = Req>
+        + std::fmt::Debug
+        + std::convert::From<RequestWithId<Req>>
+        + std::marker::Send,
     Res: Encode
         + Decode<Item = Res>
         + std::fmt::Debug
@@ -81,7 +85,11 @@ pub struct DistKVConnection<Req, Res> {
 
 impl<Req, Res> DistKVConnection<Req, Res>
 where
-    Req: Encode + Decode + std::fmt::Debug + std::convert::From<RequestWithId<Req>>,
+    Req: Encode
+        + Decode<Item = Req>
+        + std::fmt::Debug
+        + std::convert::From<RequestWithId<Req>>
+        + std::marker::Send,
     Res: Encode
         + Decode<Item = Res>
         + std::fmt::Debug
@@ -97,8 +105,8 @@ where
         }
     }
 
-    pub async fn stream(&self) -> Result<DistKVStream<Req, Res>, ClientError> {
-        DistKVStream::new(self.connection.clone())
+    pub async fn stream(&self) -> Result<QuicMessageClient<Req, Res>, ClientError> {
+        QuicMessageClient::new(self.connection.clone())
             .await
             .map_err(|e| e.into())
     }

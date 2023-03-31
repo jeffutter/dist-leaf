@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use futures::StreamExt;
 use s2n_quic::{
@@ -6,14 +7,16 @@ use s2n_quic::{
 };
 use std::{
     collections::HashMap,
-    marker::PhantomData,
+    convert::From,
+    fmt::Debug,
+    marker::{PhantomData, Send},
     pin::Pin,
     sync::{atomic::AtomicU64, Arc},
     task::{Context, Poll},
 };
 use thiserror::Error;
 use tokio::{
-    sync::{oneshot, Mutex},
+    sync::{mpsc, oneshot, Mutex},
     time::Instant,
 };
 
@@ -174,22 +177,26 @@ impl<'a, D> From<ReceiveStream> for MessageStream<'a, D> {
     }
 }
 
-pub struct DistKVStream<Req, Res> {
+#[async_trait]
+pub trait MessageClient<Req, Res>
+where
+    Req: Encode + Decode<Item = Req>,
+    Res: Encode + Decode<Item = Res>,
+{
+    async fn request(&mut self, req: Req) -> Result<Res, TransportError>;
+}
+
+pub struct QuicMessageClient<Req, Res> {
     pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Res>>>>,
     request_counter: AtomicU64,
     send_stream: SendStream,
     phantom: PhantomData<Req>,
 }
 
-impl<Req, Res> DistKVStream<Req, Res>
+impl<Req, Res> QuicMessageClient<Req, Res>
 where
-    Req: Encode + Decode + std::fmt::Debug + std::convert::From<RequestWithId<Req>>,
-    Res: Encode
-        + Decode<Item = Res>
-        + std::fmt::Debug
-        + std::marker::Sync
-        + std::marker::Send
-        + 'static,
+    Req: Encode + Decode + Debug + From<RequestWithId<Req>>,
+    Res: Encode + Decode<Item = Res> + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, TransportError> {
         // open a new stream and split the receiving and sending sides
@@ -216,8 +223,15 @@ where
             phantom: PhantomData,
         })
     }
+}
 
-    pub async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
+#[async_trait]
+impl<Req, Res> MessageClient<Req, Res> for QuicMessageClient<Req, Res>
+where
+    Req: Encode + Decode<Item = Req> + Debug + From<RequestWithId<Req>> + Send,
+    Res: Encode + Decode<Item = Res> + Debug + Sync + Send + 'static,
+{
+    async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
         let start = Instant::now();
         let id = self
             .request_counter
@@ -241,6 +255,39 @@ where
             "received: {}µs",
             Instant::now().duration_since(start).as_micros()
         );
+        Ok(result)
+    }
+}
+
+#[derive(Clone)]
+pub struct ChannelMessageClient<Req, Res> {
+    server: mpsc::Sender<(Req, oneshot::Sender<Res>)>,
+}
+
+impl<Req, Res> ChannelMessageClient<Req, Res>
+where
+    Req: std::fmt::Debug,
+    Res: std::fmt::Debug,
+{
+    pub fn new(server: mpsc::Sender<(Req, oneshot::Sender<Res>)>) -> Self {
+        Self { server }
+    }
+}
+
+#[async_trait]
+impl<Req, Res> MessageClient<Req, Res> for ChannelMessageClient<Req, Res>
+where
+    Req: Encode + Decode<Item = Req> + Debug + Send,
+    Res: Encode + Decode<Item = Res> + Debug + Send,
+{
+    async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
+        let (tx, rx) = oneshot::channel();
+        self.server
+            .send((req, tx))
+            .await
+            .expect("channel should be open");
+        let result = rx.await.expect("channel should be open");
+
         Ok(result)
     }
 }

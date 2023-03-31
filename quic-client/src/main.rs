@@ -3,7 +3,7 @@ mod protocol;
 use env_logger::Env;
 use protocol::{KVRequest, KVRequestType, KVResponse, KVResponseType};
 use quic_client::DistKVClient;
-use quic_transport::RequestWithId;
+use quic_transport::{MessageClient, RequestWithId};
 use std::{error::Error, net::SocketAddr, sync::atomic::AtomicU64, thread};
 use tokio::sync::mpsc::channel;
 
