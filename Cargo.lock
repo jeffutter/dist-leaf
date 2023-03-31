@@ -81,6 +81,7 @@ dependencies = [
  "log",
  "num_cpus",
  "quic-client",
+ "quic-transport",
  "rand 0.8.5",
  "tokio",
 ]

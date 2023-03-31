@@ -3,8 +3,8 @@ mod protocol;
 use env_logger::Env;
 use protocol::{KVRequest, KVRequestType, KVResponse, KVResponseType};
 use quic_client::DistKVClient;
-use quic_transport::{MessageClient, RequestWithId};
-use std::{error::Error, net::SocketAddr, sync::atomic::AtomicU64, thread};
+use quic_transport::MessageClient;
+use std::{error::Error, net::SocketAddr, thread};
 use tokio::sync::mpsc::channel;
 
 pub mod client_capnp {
@@ -19,7 +19,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let port = args.get(1).unwrap();
 
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-    let client: DistKVClient<KVRequestType, KVResponseType> = DistKVClient::new()?;
+    let client: DistKVClient<KVRequest, KVRequestType, KVResponse, KVResponseType> =
+        DistKVClient::new()?;
     let connection = client.connect(addr).await?;
     let mut stream = connection.stream().await?;
 
@@ -38,14 +39,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
     });
 
-    let request_counter = AtomicU64::new(0);
-
     tokio::spawn(async move {
         loop {
             if let Some(req) = rx.recv().await {
-                let id = request_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let kvrt: KVRequestType = RequestWithId::new(id, req).into();
-                let response: KVResponse = stream.request(kvrt).await.unwrap().into();
+                let response: KVResponse = stream.request(req).await.unwrap().into();
                 println!("Response: {:?}", response);
             }
         }

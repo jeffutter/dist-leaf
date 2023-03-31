@@ -1,4 +1,4 @@
-mod protocol;
+pub mod protocol;
 
 use quic_transport::{Decode, Encode, QuicMessageClient, RequestWithId, TransportError};
 use s2n_quic::{client::Connect, Client, Connection};
@@ -25,21 +25,23 @@ pub enum ClientError {
     Unknown,
 }
 
-pub struct DistKVClient<Req, Res> {
+pub struct DistKVClient<Req, ReqT, Res, ResT> {
     client: Client,
     req: PhantomData<Req>,
     res: PhantomData<Res>,
+    reqt: PhantomData<ReqT>,
+    rest: PhantomData<ResT>,
 }
 
-impl<Req, Res> DistKVClient<Req, Res>
+impl<Req, ReqT, Res, ResT> DistKVClient<Req, ReqT, Res, ResT>
 where
-    Req: Encode
-        + Decode<Item = Req>
+    ReqT: Encode
+        + Decode<Item = ReqT>
         + std::fmt::Debug
         + std::convert::From<RequestWithId<Req>>
         + std::marker::Send,
-    Res: Encode
-        + Decode<Item = Res>
+    ResT: Encode
+        + Decode<Item = ResT>
         + std::fmt::Debug
         + std::marker::Sync
         + std::marker::Send
@@ -58,13 +60,15 @@ where
             client,
             req: PhantomData,
             res: PhantomData,
+            reqt: PhantomData,
+            rest: PhantomData,
         })
     }
 
     pub async fn connect(
         &self,
         addr: SocketAddr,
-    ) -> Result<DistKVConnection<Req, Res>, ClientError> {
+    ) -> Result<DistKVConnection<Req, ReqT, Res, ResT>, ClientError> {
         let connect = Connect::new(addr).with_server_name("localhost");
         let mut connection = self.client.connect(connect).await?;
         // ensure the connection doesn't time out with inactivity
@@ -77,21 +81,23 @@ where
 }
 
 #[derive(Debug)]
-pub struct DistKVConnection<Req, Res> {
+pub struct DistKVConnection<Req, ReqT, Res, ResT> {
     connection: Arc<Mutex<Connection>>,
     req: PhantomData<Req>,
     res: PhantomData<Res>,
+    reqt: PhantomData<ReqT>,
+    rest: PhantomData<ResT>,
 }
 
-impl<Req, Res> DistKVConnection<Req, Res>
+impl<Req, ReqT, Res, ResT> DistKVConnection<Req, ReqT, Res, ResT>
 where
-    Req: Encode
-        + Decode<Item = Req>
+    ReqT: Encode
+        + Decode<Item = ReqT>
         + std::fmt::Debug
         + std::convert::From<RequestWithId<Req>>
         + std::marker::Send,
-    Res: Encode
-        + Decode<Item = Res>
+    ResT: Encode
+        + Decode<Item = ResT>
         + std::fmt::Debug
         + std::marker::Sync
         + std::marker::Send
@@ -102,10 +108,12 @@ where
             connection: Arc::new(Mutex::new(connection)),
             req: PhantomData,
             res: PhantomData,
+            reqt: PhantomData,
+            rest: PhantomData,
         }
     }
 
-    pub async fn stream(&self) -> Result<QuicMessageClient<Req, Res>, ClientError> {
+    pub async fn stream(&self) -> Result<QuicMessageClient<Req, ReqT, Res, ResT>, ClientError> {
         QuicMessageClient::new(self.connection.clone())
             .await
             .map_err(|e| e.into())

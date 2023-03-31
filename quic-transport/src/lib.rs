@@ -178,37 +178,35 @@ impl<'a, D> From<ReceiveStream> for MessageStream<'a, D> {
 }
 
 #[async_trait]
-pub trait MessageClient<Req, Res>
-where
-    Req: Encode + Decode<Item = Req>,
-    Res: Encode + Decode<Item = Res>,
-{
+pub trait MessageClient<Req, Res> {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError>;
 }
 
-pub struct QuicMessageClient<Req, Res> {
-    pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Res>>>>,
+pub struct QuicMessageClient<Req, ReqT, Res, ResT> {
+    pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<ResT>>>>,
     request_counter: AtomicU64,
     send_stream: SendStream,
-    phantom: PhantomData<Req>,
+    phantom1: PhantomData<Req>,
+    phantom2: PhantomData<Res>,
+    phantom3: PhantomData<ReqT>,
 }
 
-impl<Req, Res> QuicMessageClient<Req, Res>
+impl<Req, ReqT, Res, ResT> QuicMessageClient<Req, ReqT, Res, ResT>
 where
-    Req: Encode + Decode + Debug + From<RequestWithId<Req>>,
-    Res: Encode + Decode<Item = Res> + Debug + Sync + Send + 'static,
+    ReqT: Encode + Decode + Debug + From<RequestWithId<Req>>,
+    ResT: Encode + Decode<Item = ResT> + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, TransportError> {
         // open a new stream and split the receiving and sending sides
         let stream = connection.lock().await.open_bidirectional_stream().await?;
         let (receive_stream, send_stream) = stream.split();
 
-        let pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Res>>>> =
+        let pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<ResT>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let pending_requests1 = pending_requests.clone();
         tokio::spawn(async move {
-            let mut response_stream: MessageStream<Res> = receive_stream.into();
+            let mut response_stream: MessageStream<ResT> = receive_stream.into();
             while let Some(Ok((req, _data))) = response_stream.next().await {
                 let tx = pending_requests1.lock().await.remove(req.id()).unwrap();
                 tx.send(req).unwrap();
@@ -220,23 +218,27 @@ where
             pending_requests,
 
             request_counter: AtomicU64::new(0),
-            phantom: PhantomData,
+            phantom1: PhantomData,
+            phantom2: PhantomData,
+            phantom3: PhantomData,
         })
     }
 }
 
 #[async_trait]
-impl<Req, Res> MessageClient<Req, Res> for QuicMessageClient<Req, Res>
+impl<Req, ReqT, Res, ResT> MessageClient<Req, Res> for QuicMessageClient<Req, ReqT, Res, ResT>
 where
-    Req: Encode + Decode<Item = Req> + Debug + From<RequestWithId<Req>> + Send,
-    Res: Encode + Decode<Item = Res> + Debug + Sync + Send + 'static,
+    ReqT: Encode + Decode<Item = ReqT> + From<RequestWithId<Req>> + Send,
+    ResT: Encode + Decode<Item = ResT> + Debug + Sync + Send + 'static,
+    Res: From<ResT> + Send,
+    Req: Send,
 {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
         let start = Instant::now();
         let id = self
             .request_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let kvrt: Req = RequestWithId::new(id, req).into();
+        let kvrt: ReqT = RequestWithId::new(id, req).into();
         let encoded = kvrt.encode();
         log::debug!("Encoded Data: {:?}", encoded);
         log::debug!(
@@ -255,7 +257,7 @@ where
             "received: {}µs",
             Instant::now().duration_since(start).as_micros()
         );
-        Ok(result)
+        Ok(result.into())
     }
 }
 
