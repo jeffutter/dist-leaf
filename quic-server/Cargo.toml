@@ -20,6 +20,9 @@ core_affinity = "0.8.0"
 log = "0.4"
 futures = "0.3"
 env_logger = "0.10"
-net = { path = "../net" }
 db = { path = "../db" }
 quic-transport = { path = "../quic-transport" }
+capnp = "0.16"
+
+[build-dependencies]
+capnpc = "0.16"

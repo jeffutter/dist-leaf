@@ -1,12 +1,12 @@
 use crate::{
     mdns,
+    protocol::{KVRequest, KVResponse},
     s2s_connection::{self, S2SConnection, S2SConnections},
     ServerError,
 };
 use bytes::Bytes;
 use futures::{Future, StreamExt};
-use net::{KVRequestType, KVResponseType};
-use quic_transport::{DataStream, RequestStream};
+use quic_transport::{DataStream, Decode, Encode, MessageStream};
 use s2n_quic::{connection, stream::BidirectionalStream, Client, Server};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
 use tokio::{
@@ -93,12 +93,12 @@ impl VNode {
     }
 
     async fn handle_local(
-        req: KVRequestType,
+        req: KVRequest,
         storage: db::Database,
         start: Instant,
     ) -> Result<Bytes, ServerError> {
         match req {
-            KVRequestType::Get { id, key } => {
+            KVRequest::Get { id, key } => {
                 log::debug!("Serve Local");
                 log::debug!(
                     "checked connection: {}µs",
@@ -109,19 +109,20 @@ impl VNode {
                     "fetched: {}µs",
                     Instant::now().duration_since(start).as_micros()
                 );
-                let res = net::encode_response(KVResponseType::Result {
+                let res = KVResponse::Result {
                     id,
                     result: res_data,
-                });
+                }
+                .encode();
                 log::debug!(
                     "encoded: {}µs",
                     Instant::now().duration_since(start).as_micros()
                 );
                 Ok(res)
             }
-            KVRequestType::Put { id, key, value } => {
+            KVRequest::Put { id, key, value } => {
                 storage.put(&key, &value)?;
-                let res = net::encode_response(KVResponseType::Ok(id));
+                let res = KVResponse::Ok(id).encode();
                 Ok(res)
             }
         }
@@ -135,7 +136,7 @@ impl VNode {
         async move {
             let (receive_stream, mut send_stream) = stream.split();
             let data_stream = DataStream::new(receive_stream);
-            let mut request_stream = RequestStream::new(data_stream);
+            let mut request_stream: MessageStream<KVRequest> = MessageStream::new(data_stream);
 
             let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
                 mpsc::channel(100);
@@ -225,7 +226,7 @@ impl VNode {
                     tokio::spawn(async move {
                         let start = Instant::now();
                         log::debug!("Handling Local Data: {:?}", data);
-                        let req = net::decode_request(data.as_ref())?;
+                        let req = KVRequest::decode(data.as_ref())?;
                         log::debug!(
                             "decoded: {}µs",
                             Instant::now().duration_since(start).as_micros()

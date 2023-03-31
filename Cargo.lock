@@ -68,7 +68,6 @@ dependencies = [
  "futures",
  "itertools",
  "log",
- "net",
  "num_cpus",
  "quic-client",
  "rand 0.8.5",
@@ -889,19 +888,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "net"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "capnp",
- "capnpc",
- "futures",
- "log",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1113,10 +1099,12 @@ dependencies = [
 name = "quic-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "capnp",
+ "capnpc",
  "env_logger",
  "futures",
  "log",
- "net",
  "quic-transport",
  "s2n-quic",
  "thiserror",
@@ -1128,6 +1116,8 @@ name = "quic-server"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "capnp",
+ "capnpc",
  "consistent_hash_ring",
  "core_affinity",
  "db",
@@ -1136,7 +1126,6 @@ dependencies = [
  "local-ip-address",
  "log",
  "mdns-sd",
- "net",
  "quic-transport",
  "rand 0.8.5",
  "s2n-quic",
@@ -1153,9 +1142,9 @@ dependencies = [
  "bytes",
  "futures",
  "log",
- "net",
  "s2n-quic",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

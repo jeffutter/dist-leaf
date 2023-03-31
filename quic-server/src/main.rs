@@ -1,10 +1,12 @@
 mod mdns;
+mod protocol;
 mod s2s_connection;
 mod vnode;
 
 use bytes::Bytes;
 use db::DatabaseError;
 use env_logger::Env;
+use quic_transport::TransportError;
 use s2s_connection::S2SConnections;
 use std::{collections::HashMap, error::Error, thread};
 use thiserror::Error;
@@ -17,12 +19,18 @@ use vnode::VNodeId;
 
 use crate::vnode::VNode;
 
+pub mod server_capnp {
+    include!(concat!(env!("OUT_DIR"), "/server_capnp.rs"));
+}
+
 #[derive(Error, Debug)]
 pub enum ServerError {
     #[error("database error")]
     Database(#[from] DatabaseError),
-    #[error("decoding error")]
-    Decoding(#[from] net::KVServerError),
+    // #[error("decoding error")]
+    // Decoding(#[from] net::KVServerError),
+    #[error("transport error")]
+    Decoding(#[from] TransportError),
     #[error("connection error")]
     Connection(#[from] s2n_quic::connection::Error),
     #[error("stream error")]

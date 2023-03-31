@@ -1,17 +1,14 @@
-use futures::StreamExt;
-use net::{encode_request, KVRequestType, KVResponseType};
-use quic_transport::ResponseStream;
-use s2n_quic::{client::Connect, stream::SendStream, Client, Connection};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{atomic::AtomicU64, Arc},
-};
+mod protocol;
+
+use quic_transport::{Decode, DistKVStream, Encode, RequestWithId, TransportError};
+use s2n_quic::{client::Connect, Client, Connection};
+use std::{marker::PhantomData, net::SocketAddr, sync::Arc};
 use thiserror::Error;
-use tokio::{
-    sync::{oneshot, Mutex},
-    time::Instant,
-};
+use tokio::sync::Mutex;
+
+pub mod client_capnp {
+    include!(concat!(env!("OUT_DIR"), "/client_capnp.rs"));
+}
 
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/cert.pem"));
@@ -22,15 +19,28 @@ pub enum ClientError {
     Connection(#[from] s2n_quic::connection::Error),
     #[error("initialization error: {}", .0)]
     Initialization(String),
+    #[error("transport error")]
+    Transport(#[from] TransportError),
     #[error("unknown client error")]
     Unknown,
 }
 
-pub struct DistKVClient {
+pub struct DistKVClient<Req, Res> {
     client: Client,
+    req: PhantomData<Req>,
+    res: PhantomData<Res>,
 }
 
-impl DistKVClient {
+impl<Req, Res> DistKVClient<Req, Res>
+where
+    Req: Encode + Decode + std::fmt::Debug + std::convert::From<RequestWithId<Req>>,
+    Res: Encode
+        + Decode<Item = Res>
+        + std::fmt::Debug
+        + std::marker::Sync
+        + std::marker::Send
+        + 'static,
+{
     pub fn new() -> Result<Self, ClientError> {
         let client = Client::builder()
             .with_tls(CERT_PEM)
@@ -40,10 +50,17 @@ impl DistKVClient {
             .start()
             .map_err(|e| ClientError::Initialization(e.to_string()))?;
 
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            req: PhantomData,
+            res: PhantomData,
+        })
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> Result<DistKVConnection, ClientError> {
+    pub async fn connect(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<DistKVConnection<Req, Res>, ClientError> {
         let connect = Connect::new(addr).with_server_name("localhost");
         let mut connection = self.client.connect(connect).await?;
         // ensure the connection doesn't time out with inactivity
@@ -56,107 +73,33 @@ impl DistKVClient {
 }
 
 #[derive(Debug)]
-pub struct DistKVConnection {
+pub struct DistKVConnection<Req, Res> {
     connection: Arc<Mutex<Connection>>,
+    req: PhantomData<Req>,
+    res: PhantomData<Res>,
 }
 
-impl DistKVConnection {
+impl<Req, Res> DistKVConnection<Req, Res>
+where
+    Req: Encode + Decode + std::fmt::Debug + std::convert::From<RequestWithId<Req>>,
+    Res: Encode
+        + Decode<Item = Res>
+        + std::fmt::Debug
+        + std::marker::Sync
+        + std::marker::Send
+        + 'static,
+{
     pub async fn new(connection: Connection) -> Self {
         Self {
             connection: Arc::new(Mutex::new(connection)),
+            req: PhantomData,
+            res: PhantomData,
         }
     }
 
-    pub async fn stream(&self) -> Result<DistKVStream, ClientError> {
-        DistKVStream::new(self.connection.clone()).await
-    }
-}
-
-pub struct DistKVStream {
-    pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<KVResponseType>>>>,
-    request_counter: AtomicU64,
-    send_stream: SendStream,
-}
-
-impl DistKVStream {
-    async fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, ClientError> {
-        // open a new stream and split the receiving and sending sides
-        let stream = connection.lock().await.open_bidirectional_stream().await?;
-        let (receive_stream, send_stream) = stream.split();
-
-        let pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<KVResponseType>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let pending_requests1 = pending_requests.clone();
-        tokio::spawn(async move {
-            let mut response_stream: ResponseStream = receive_stream.into();
-            while let Some(Ok((req, _data))) = response_stream.next().await {
-                let tx = pending_requests1.lock().await.remove(req.id()).unwrap();
-                tx.send(req).unwrap();
-            }
-        });
-
-        Ok(Self {
-            send_stream,
-            pending_requests,
-
-            request_counter: AtomicU64::new(0),
-        })
-    }
-
-    pub async fn request(&mut self, req: KVRequest) -> Result<KVResponseType, ClientError> {
-        let start = Instant::now();
-        let id = self
-            .request_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let encoded = encode_request(KVRequestWithId::new(id, req).into());
-        log::debug!("Encoded Data: {:?}", encoded);
-        log::debug!(
-            "encoded: {}µs",
-            Instant::now().duration_since(start).as_micros()
-        );
-        self.send_stream.send(encoded).await.unwrap();
-        let (tx, rx) = oneshot::channel();
-        self.pending_requests.lock().await.insert(id, tx);
-        log::debug!(
-            "sent: {}µs",
-            Instant::now().duration_since(start).as_micros()
-        );
-        let result = rx.await.expect("channel should be open");
-        log::debug!(
-            "received: {}µs",
-            Instant::now().duration_since(start).as_micros()
-        );
-        Ok(result)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KVRequest {
-    Get { key: String },
-    Put { key: String, value: String },
-}
-
-struct KVRequestWithId {
-    id: u64,
-    kv_request: KVRequest,
-}
-
-impl KVRequestWithId {
-    fn new(id: u64, kv_request: KVRequest) -> Self {
-        Self { id, kv_request }
-    }
-}
-
-impl Into<KVRequestType> for KVRequestWithId {
-    fn into(self) -> KVRequestType {
-        match self.kv_request {
-            KVRequest::Get { key } => KVRequestType::Get { id: self.id, key },
-            KVRequest::Put { key, value } => KVRequestType::Put {
-                id: self.id,
-                key,
-                value,
-            },
-        }
+    pub async fn stream(&self) -> Result<DistKVStream<Req, Res>, ClientError> {
+        DistKVStream::new(self.connection.clone())
+            .await
+            .map_err(|e| e.into())
     }
 }

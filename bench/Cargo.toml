@@ -12,7 +12,6 @@ rand = "0.8"
 itertools = "0.10.5"
 
 [dependencies]
-net = { path = "../net" }
 quic-client = { path = "../quic-client" }
 tokio = { version = "1.26.0", features = ["macros", "rt"] }
 futures = "0.3.26"
