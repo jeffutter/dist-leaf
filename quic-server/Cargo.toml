@@ -22,6 +22,7 @@ futures = "0.3"
 env_logger = "0.10"
 db = { path = "../db" }
 quic-transport = { path = "../quic-transport" }
+quic-client = { path = "../quic-client" }
 capnp = "0.16"
 
 [build-dependencies]

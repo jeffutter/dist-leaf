@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
-use quic_transport::{Decode, Encode, TransportError};
+use quic_transport::{Decode, Encode, RequestWithId, TransportError};
 use std::io::Write;
 use thiserror::Error;
 use tokio::io;
@@ -200,6 +200,70 @@ impl Decode for KVResponse {
             KVResponse::Error { id, .. } => id,
             KVResponse::Result { id, .. } => id,
             KVResponse::Ok(id) => id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KVReq {
+    Get { key: String },
+    Put { key: String, value: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KVRes {
+    Error { error: String },
+    Result { result: Option<String> },
+    Ok,
+}
+
+impl From<KVRequest> for KVReq {
+    fn from(req: KVRequest) -> Self {
+        match req {
+            KVRequest::Get { key, .. } => KVReq::Get { key },
+            KVRequest::Put { key, value, .. } => KVReq::Put { key, value },
+        }
+    }
+}
+
+impl From<KVResponse> for KVRes {
+    fn from(res: KVResponse) -> Self {
+        match res {
+            KVResponse::Error { error, .. } => KVRes::Error { error },
+            KVResponse::Result { result, .. } => KVRes::Result { result },
+            KVResponse::Ok(_) => KVRes::Ok,
+        }
+    }
+}
+
+impl From<RequestWithId<KVReq>> for KVRequest {
+    fn from(req_with_id: RequestWithId<KVReq>) -> Self {
+        match req_with_id.request {
+            KVReq::Get { key } => KVRequest::Get {
+                id: req_with_id.id,
+                key,
+            },
+            KVReq::Put { key, value } => KVRequest::Put {
+                id: req_with_id.id,
+                key,
+                value,
+            },
+        }
+    }
+}
+
+impl From<RequestWithId<KVRes>> for KVResponse {
+    fn from(res_with_id: RequestWithId<KVRes>) -> Self {
+        match res_with_id.request {
+            KVRes::Error { error } => KVResponse::Error {
+                id: res_with_id.id,
+                error,
+            },
+            KVRes::Result { result } => KVResponse::Result {
+                id: res_with_id.id,
+                result,
+            },
+            KVRes::Ok => KVResponse::Ok(res_with_id.id),
         }
     }
 }

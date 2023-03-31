@@ -178,10 +178,11 @@ impl<'a, D> From<ReceiveStream> for MessageStream<'a, D> {
 }
 
 #[async_trait]
-pub trait MessageClient<Req, Res> {
+pub trait MessageClient<Req, Res>: Send + Sync + Debug {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError>;
 }
 
+#[derive(Debug)]
 pub struct QuicMessageClient<Req, ReqT, Res, ResT> {
     pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<ResT>>>>,
     request_counter: AtomicU64,
@@ -228,10 +229,10 @@ where
 #[async_trait]
 impl<Req, ReqT, Res, ResT> MessageClient<Req, Res> for QuicMessageClient<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode<Item = ReqT> + From<RequestWithId<Req>> + Send,
-    ResT: Encode + Decode<Item = ResT> + Debug + Sync + Send + 'static,
-    Res: From<ResT> + Send,
-    Req: Send,
+    ReqT: Encode + Decode<Item = ReqT> + From<RequestWithId<Req>> + Send + Sync + Debug,
+    ResT: Encode + Decode<Item = ResT> + Debug + Send + Sync + Debug + 'static,
+    Res: From<ResT> + Send + Sync + Debug,
+    Req: Send + Sync + Debug,
 {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
         let start = Instant::now();
@@ -261,7 +262,7 @@ where
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChannelMessageClient<Req, Res> {
     server: mpsc::Sender<(Req, oneshot::Sender<Res>)>,
 }
@@ -279,8 +280,8 @@ where
 #[async_trait]
 impl<Req, Res> MessageClient<Req, Res> for ChannelMessageClient<Req, Res>
 where
-    Req: Encode + Decode<Item = Req> + Debug + Send,
-    Res: Encode + Decode<Item = Res> + Debug + Send,
+    Req: Debug + Send,
+    Res: Debug + Send,
 {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
         let (tx, rx) = oneshot::channel();

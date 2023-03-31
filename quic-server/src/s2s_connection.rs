@@ -1,52 +1,30 @@
-use crate::{vnode::Destination, ServerError, VNodeId};
-use bytes::Bytes;
+use crate::{
+    protocol::{KVReq, KVRequest, KVRes, KVResponse},
+    vnode::Destination,
+    ServerError, VNodeId,
+};
 use consistent_hash_ring::{Ring, RingBuilder};
-use s2n_quic::{client::Connect, stream::BidirectionalStream, Client};
+use quic_client::DistKVClient;
+use quic_transport::{ChannelMessageClient, MessageClient};
 use std::{collections::HashMap, net::SocketAddr};
-use tokio::sync::{mpsc, oneshot};
-
-#[derive(Debug)]
-pub(crate) struct S2SConnection {
-    stream: BidirectionalStream,
-}
-
-impl S2SConnection {
-    async fn new(addr: SocketAddr, client: Client) -> Result<Self, ServerError> {
-        let connect = Connect::new(addr).with_server_name("localhost");
-        let mut connection = client.connect(connect).await?;
-        connection.keep_alive(true)?;
-        let stream = connection.open_bidirectional_stream().await?;
-
-        Ok(Self { stream })
-    }
-
-    pub(crate) async fn send(&mut self, data: Bytes) -> Result<(), ServerError> {
-        self.stream.send(data).await?;
-        Ok(())
-    }
-
-    pub(crate) async fn recv(&mut self) -> Result<Option<Bytes>, ServerError> {
-        let data = self.stream.receive().await?;
-        Ok(data)
-    }
-}
 
 pub(crate) struct S2SConnections {
-    connections: HashMap<VNodeId, S2SConnection>,
-    channels: HashMap<VNodeId, mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>>,
+    connections: HashMap<VNodeId, Box<dyn MessageClient<KVReq, KVRes>>>,
     ring: Ring<VNodeId>,
-    client: Client,
+    client: DistKVClient<KVReq, KVRequest, KVRes, KVResponse>,
     vnode_id: VNodeId,
 }
 
 impl S2SConnections {
-    pub(crate) fn new(client: Client, vnode_id: VNodeId) -> Self {
+    pub(crate) fn new(
+        client: DistKVClient<KVReq, KVRequest, KVRes, KVResponse>,
+        vnode_id: VNodeId,
+    ) -> Self {
         let mut ring = RingBuilder::default().build();
         ring.insert(vnode_id.clone());
 
         Self {
             connections: HashMap::new(),
-            channels: HashMap::new(),
             ring,
             client,
             vnode_id,
@@ -59,8 +37,9 @@ impl S2SConnections {
         addr: SocketAddr,
     ) -> Result<(), ServerError> {
         if let None = self.connections.get(&vnode_id) {
-            let s2s_connection = S2SConnection::new(addr, self.client.clone()).await?;
-            self.connections.insert(vnode_id.clone(), s2s_connection);
+            let connection = self.client.connect(addr).await.unwrap();
+            let stream = connection.stream().await.unwrap();
+            self.connections.insert(vnode_id.clone(), Box::new(stream));
             self.ring.insert(vnode_id);
         }
 
@@ -70,10 +49,11 @@ impl S2SConnections {
     pub(crate) fn add_channel(
         &mut self,
         vnode_id: VNodeId,
-        channel: mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>,
+        channel_client: ChannelMessageClient<KVReq, KVRes>,
     ) {
-        if let None = self.channels.get(&vnode_id) {
-            self.channels.insert(vnode_id.clone(), channel);
+        if let None = self.connections.get(&vnode_id) {
+            self.connections
+                .insert(vnode_id.clone(), Box::new(channel_client));
             self.ring.insert(vnode_id);
         }
     }
@@ -87,7 +67,7 @@ impl S2SConnections {
                 node_id,
                 core_id: _,
             } if node_id == &self.vnode_id.node_id => {
-                let channel = self.channels.get_mut(vnode_id).unwrap();
+                let channel = self.connections.get_mut(vnode_id).unwrap();
                 Destination::Adjacent(channel)
             }
             vnode_id => {

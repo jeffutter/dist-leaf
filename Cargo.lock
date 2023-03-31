@@ -1138,6 +1138,7 @@ dependencies = [
  "local-ip-address",
  "log",
  "mdns-sd",
+ "quic-client",
  "quic-transport",
  "rand 0.8.5",
  "s2n-quic",

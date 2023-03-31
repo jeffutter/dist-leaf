@@ -1,13 +1,16 @@
 use crate::{
     mdns,
-    protocol::{KVRequest, KVResponse},
-    s2s_connection::{self, S2SConnection, S2SConnections},
+    protocol::{KVReq, KVRequest, KVRes, KVResponse},
+    s2s_connection::{self, S2SConnections},
     ServerError,
 };
 use bytes::Bytes;
 use futures::{Future, StreamExt};
-use quic_transport::{DataStream, Decode, Encode, MessageStream};
-use s2n_quic::{connection, stream::BidirectionalStream, Client, Server};
+use quic_client::DistKVClient;
+use quic_transport::{
+    ChannelMessageClient, DataStream, Decode, Encode, MessageClient, MessageStream, RequestWithId,
+};
+use s2n_quic::{connection, stream::BidirectionalStream, Server};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
 use tokio::{
     select,
@@ -38,7 +41,7 @@ pub(crate) struct VNode {
     storage: db::Database,
     pub(crate) mdns: mdns::MDNS,
     server: s2n_quic::Server,
-    rx: mpsc::Receiver<(Bytes, oneshot::Sender<Bytes>)>,
+    rx: mpsc::Receiver<(KVReq, oneshot::Sender<KVRes>)>,
 }
 
 impl VNode {
@@ -46,8 +49,8 @@ impl VNode {
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        rx: mpsc::Receiver<(Bytes, oneshot::Sender<Bytes>)>,
-        vnode_to_tx: HashMap<VNodeId, mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>>,
+        rx: mpsc::Receiver<(KVReq, oneshot::Sender<KVRes>)>,
+        vnode_to_cmc: HashMap<VNodeId, ChannelMessageClient<KVReq, KVRes>>,
     ) -> Result<Self, ServerError> {
         let vnode_id = VNodeId::new(node_id, core_id);
 
@@ -64,19 +67,14 @@ impl VNode {
             .local_addr()
             .map_err(|e| ServerError::Initialization(e.to_string()))?
             .port();
+
         log::info!("Starting Server on Port: {}", port);
 
-        let client = Client::builder()
-            .with_tls(CERT_PEM)
-            .map_err(|e| ServerError::Initialization(e.to_string()))?
-            .with_io("0.0.0.0:0")
-            .map_err(|e| ServerError::Initialization(e.to_string()))?
-            .start()
-            .map_err(|e| ServerError::Initialization(e.to_string()))?;
+        let client = DistKVClient::new().unwrap();
 
         let mut connections = s2s_connection::S2SConnections::new(client, vnode_id);
-        for (vnode_id, tx) in vnode_to_tx {
-            connections.add_channel(vnode_id, tx)
+        for (vnode_id, channel_message_client) in vnode_to_cmc {
+            connections.add_channel(vnode_id, channel_message_client)
         }
         let connections = Arc::new(Mutex::new(connections));
         let storage = db::Database::new_tmp();
@@ -93,12 +91,12 @@ impl VNode {
     }
 
     async fn handle_local(
-        req: KVRequest,
+        req: KVReq,
         storage: db::Database,
         start: Instant,
-    ) -> Result<Bytes, ServerError> {
+    ) -> Result<KVRes, ServerError> {
         match req {
-            KVRequest::Get { id, key } => {
+            KVReq::Get { key } => {
                 log::debug!("Serve Local");
                 log::debug!(
                     "checked connection: {}µs",
@@ -109,20 +107,12 @@ impl VNode {
                     "fetched: {}µs",
                     Instant::now().duration_since(start).as_micros()
                 );
-                let res = KVResponse::Result {
-                    id,
-                    result: res_data,
-                }
-                .encode();
-                log::debug!(
-                    "encoded: {}µs",
-                    Instant::now().duration_since(start).as_micros()
-                );
+                let res = KVRes::Result { result: res_data };
                 Ok(res)
             }
-            KVRequest::Put { id, key, value } => {
+            KVReq::Put { key, value } => {
                 storage.put(&key, &value)?;
-                let res = KVResponse::Ok(id).encode();
+                let res = KVRes::Ok;
                 Ok(res)
             }
         }
@@ -158,26 +148,36 @@ impl VNode {
 
                     match connections.lock().await.get(req.key()) {
                         Destination::Remote(connection) => {
-                            log::debug!("Forward to: {:?}", connection);
+                            log::debug!("Forward to Remote:   {:?}", connection);
                             log::debug!("Forwarding Data:     {:?}", req);
-                            connection.send(data).await?;
-                            let data = connection.recv().await?.expect("Missing Data");
-                            send_tx.send(data).await.expect("stream should be open");
+                            let id = req.id().clone();
+                            let res = connection.request(req.into()).await?;
+                            let res = RequestWithId::new(id, res);
+                            let res: KVResponse = res.into();
+                            let encoded = res.encode();
+                            send_tx.send(encoded).await.expect("stream should be open");
+                            log::debug!("Found on Remote:     {:?}", res);
                         }
                         Destination::Adjacent(channel) => {
                             log::debug!("Forward to Adjacent");
                             log::debug!("Forwarding Data:     {:?}", data);
-                            let (tx, rx) = oneshot::channel();
-                            channel
-                                .send((data, tx))
-                                .await
-                                .expect("channel should be open");
-                            let data = rx.await.expect("channel should be open");
-                            send_tx.send(data).await.expect("stream should be open");
+                            let id = req.id().clone();
+                            let res = channel.request(req.into()).await?;
+                            let res = RequestWithId::new(id, res);
+                            let res: KVResponse = res.into();
+                            let encoded = res.encode();
+                            send_tx.send(encoded).await.expect("stream should be open");
+                            log::debug!("Found on Adjacent:   {:?}", res);
                         }
                         Destination::Local => {
-                            let res = Self::handle_local(req, storage, start).await?;
-                            send_tx.send(res).await.expect("stream should be open");
+                            log::debug!("Handle Local");
+                            let id = req.id().clone();
+                            let res = Self::handle_local(req.into(), storage, start).await?;
+                            let res = RequestWithId::new(id, res);
+                            let res: KVResponse = res.into();
+                            let encoded = res.encode();
+                            log::debug!("Eencoded Local");
+                            send_tx.send(encoded).await.expect("stream should be open");
                             log::debug!(
                                 "sent: {}µs",
                                 Instant::now().duration_since(start).as_micros()
@@ -222,17 +222,14 @@ impl VNode {
                         storage.clone(),
                     ));
                 }
-                Some((data, tx)) = self.rx.recv() => {
+                Some((req, tx)) = self.rx.recv() => {
                     tokio::spawn(async move {
                         let start = Instant::now();
-                        log::debug!("Handling Local Data: {:?}", data);
-                        let req = KVRequest::decode(data.as_ref())?;
-                        log::debug!(
-                            "decoded: {}µs",
-                            Instant::now().duration_since(start).as_micros()
-                        );
+                        log::debug!("Handling Local Data: {:?}", req);
                         let res = Self::handle_local(req, storage, start).await?;
-                        tx.send(res).expect("channel should be open");
+                        log::debug!("Sending Local Data: {:?}", res.clone());
+                        tx.send(res.clone()).expect("channel should be open");
+                        log::debug!("Sent Local Data: {:?}", res);
 
                         Ok::<(), ServerError>(())
                     });
@@ -243,7 +240,7 @@ impl VNode {
 }
 
 pub(crate) enum Destination<'a> {
-    Remote(&'a mut S2SConnection),
-    Adjacent(&'a mut mpsc::Sender<(Bytes, oneshot::Sender<Bytes>)>),
+    Remote(&'a mut Box<dyn MessageClient<KVReq, KVRes>>),
+    Adjacent(&'a mut Box<dyn MessageClient<KVReq, KVRes>>),
     Local,
 }
