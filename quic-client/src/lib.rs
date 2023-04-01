@@ -36,8 +36,8 @@ pub struct DistKVClient<Req, ReqT, Res, ResT> {
 
 impl<Req, ReqT, Res, ResT> DistKVClient<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode<Item = ReqT> + Debug + From<RequestWithId<Req>> + Send,
-    ResT: Encode + Decode<Item = ResT> + Debug + Sync + Send + 'static,
+    ReqT: Encode + Decode + Debug + From<RequestWithId<Req>> + Send,
+    ResT: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub fn new() -> Result<Self, ClientError> {
         let client = Client::builder()
@@ -83,8 +83,8 @@ pub struct DistKVConnection<Req, ReqT, Res, ResT> {
 
 impl<Req, ReqT, Res, ResT> DistKVConnection<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode<Item = ReqT> + Debug + From<RequestWithId<Req>> + Send,
-    ResT: Encode + Decode<Item = ResT> + Debug + Sync + Send + 'static,
+    ReqT: Encode + Decode + Debug + From<RequestWithId<Req>> + Send,
+    ResT: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Connection) -> Self {
         Self {

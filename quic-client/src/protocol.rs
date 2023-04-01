@@ -12,8 +12,6 @@ pub enum KVRequestType {
 }
 
 impl Encode for KVRequestType {
-    type Item = Self;
-
     fn encode(&self) -> Bytes {
         let mut message = ::capnp::message::Builder::new_default();
 
@@ -45,8 +43,6 @@ impl Encode for KVRequestType {
 }
 
 impl Decode for KVRequestType {
-    type Item = Self;
-
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
             serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();
@@ -98,8 +94,6 @@ pub enum KVResponseType {
 }
 
 impl Encode for KVResponseType {
-    type Item = Self;
-
     fn encode(&self) -> Bytes {
         let mut message = ::capnp::message::Builder::new_default();
 
@@ -139,8 +133,6 @@ impl Encode for KVResponseType {
 }
 
 impl Decode for KVResponseType {
-    type Item = Self;
-
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
             serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();

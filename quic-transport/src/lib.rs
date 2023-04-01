@@ -122,13 +122,13 @@ impl futures::stream::Stream for DataStream {
 }
 
 pub trait Decode {
-    type Item;
-    fn decode(bytes: &[u8]) -> Result<Self::Item, TransportError>;
+    fn decode(bytes: &[u8]) -> Result<Self, TransportError>
+    where
+        Self: Sized;
     fn id(&self) -> &u64;
 }
 
 pub trait Encode {
-    type Item;
     fn encode(&self) -> Bytes;
 }
 
@@ -150,7 +150,7 @@ impl<'a, D> futures::stream::Stream for MessageStream<'a, D>
 where
     D: Decode,
 {
-    type Item = Result<(<D as Decode>::Item, Bytes), TransportError>;
+    type Item = Result<(D, Bytes), TransportError>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
@@ -195,7 +195,7 @@ pub struct QuicMessageClient<Req, ReqT, Res, ResT> {
 impl<Req, ReqT, Res, ResT> QuicMessageClient<Req, ReqT, Res, ResT>
 where
     ReqT: Encode + Decode + Debug + From<RequestWithId<Req>>,
-    ResT: Encode + Decode<Item = ResT> + Debug + Sync + Send + 'static,
+    ResT: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, TransportError> {
         // open a new stream and split the receiving and sending sides
@@ -229,8 +229,8 @@ where
 #[async_trait]
 impl<Req, ReqT, Res, ResT> MessageClient<Req, Res> for QuicMessageClient<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode<Item = ReqT> + From<RequestWithId<Req>> + Send + Sync + Debug,
-    ResT: Encode + Decode<Item = ResT> + Debug + Send + Sync + Debug + 'static,
+    ReqT: Encode + Decode + From<RequestWithId<Req>> + Send + Sync + Debug,
+    ResT: Encode + Decode + Debug + Send + Sync + Debug + 'static,
     Res: From<ResT> + Send + Sync + Debug,
     Req: Send + Sync + Debug,
 {
