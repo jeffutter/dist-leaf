@@ -2,6 +2,7 @@ pub mod protocol;
 
 use quic_transport::{Decode, Encode, QuicMessageClient, RequestWithId, TransportError};
 use s2n_quic::{client::Connect, Client, Connection};
+use std::fmt::Debug;
 use std::{marker::PhantomData, net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -35,17 +36,8 @@ pub struct DistKVClient<Req, ReqT, Res, ResT> {
 
 impl<Req, ReqT, Res, ResT> DistKVClient<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode
-        + Decode<Item = ReqT>
-        + std::fmt::Debug
-        + std::convert::From<RequestWithId<Req>>
-        + std::marker::Send,
-    ResT: Encode
-        + Decode<Item = ResT>
-        + std::fmt::Debug
-        + std::marker::Sync
-        + std::marker::Send
-        + 'static,
+    ReqT: Encode + Decode<Item = ReqT> + Debug + From<RequestWithId<Req>> + Send,
+    ResT: Encode + Decode<Item = ResT> + Debug + Sync + Send + 'static,
 {
     pub fn new() -> Result<Self, ClientError> {
         let client = Client::builder()
@@ -91,17 +83,8 @@ pub struct DistKVConnection<Req, ReqT, Res, ResT> {
 
 impl<Req, ReqT, Res, ResT> DistKVConnection<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode
-        + Decode<Item = ReqT>
-        + std::fmt::Debug
-        + std::convert::From<RequestWithId<Req>>
-        + std::marker::Send,
-    ResT: Encode
-        + Decode<Item = ResT>
-        + std::fmt::Debug
-        + std::marker::Sync
-        + std::marker::Send
-        + 'static,
+    ReqT: Encode + Decode<Item = ReqT> + Debug + From<RequestWithId<Req>> + Send,
+    ResT: Encode + Decode<Item = ResT> + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Connection) -> Self {
         Self {

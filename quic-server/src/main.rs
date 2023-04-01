@@ -27,8 +27,6 @@ pub mod server_capnp {
 pub enum ServerError {
     #[error("database error")]
     Database(#[from] DatabaseError),
-    // #[error("decoding error")]
-    // Decoding(#[from] net::KVServerError),
     #[error("transport error")]
     Decoding(#[from] TransportError),
     #[error("connection error")]

@@ -269,8 +269,8 @@ pub struct ChannelMessageClient<Req, Res> {
 
 impl<Req, Res> ChannelMessageClient<Req, Res>
 where
-    Req: std::fmt::Debug,
-    Res: std::fmt::Debug,
+    Req: Debug,
+    Res: Debug,
 {
     pub fn new(server: mpsc::Sender<(Req, oneshot::Sender<Res>)>) -> Self {
         Self { server }
