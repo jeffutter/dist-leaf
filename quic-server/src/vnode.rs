@@ -139,7 +139,7 @@ impl VNode {
                 Ok::<(), ServerError>(())
             });
 
-            while let Some(Ok((req, data))) = request_stream.next().await {
+            while let Some(Ok((req, _data))) = request_stream.next().await {
                 let storage = storage.clone();
                 let connections = connections.clone();
                 let send_tx = send_tx.clone();
@@ -157,17 +157,6 @@ impl VNode {
                             let encoded = res.encode();
                             send_tx.send(encoded).await.expect("stream should be open");
                             log::debug!("Found on Remote:     {:?}", res);
-                        }
-                        Destination::Adjacent(channel) => {
-                            log::debug!("Forward to Adjacent");
-                            log::debug!("Forwarding Data:     {:?}", data);
-                            let id = req.id().clone();
-                            let res = channel.request(req.into()).await?;
-                            let res = RequestWithId::new(id, res);
-                            let res: KVResponse = res.into();
-                            let encoded = res.encode();
-                            send_tx.send(encoded).await.expect("stream should be open");
-                            log::debug!("Found on Adjacent:   {:?}", res);
                         }
                         Destination::Local => {
                             log::debug!("Handle Local");
@@ -241,6 +230,5 @@ impl VNode {
 
 pub(crate) enum Destination<'a> {
     Remote(&'a mut Box<dyn MessageClient<KVReq, KVRes>>),
-    Adjacent(&'a mut Box<dyn MessageClient<KVReq, KVRes>>),
     Local,
 }

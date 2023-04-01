@@ -63,16 +63,9 @@ impl S2SConnections {
 
         match vnode_id {
             vnode_id if vnode_id == &self.vnode_id => Destination::Local,
-            VNodeId {
-                node_id,
-                core_id: _,
-            } if node_id == &self.vnode_id.node_id => {
-                let channel = self.connections.get_mut(vnode_id).unwrap();
-                Destination::Adjacent(channel)
-            }
             vnode_id => {
-                let connection = self.connections.get_mut(vnode_id).unwrap();
-                Destination::Remote(connection)
+                let client = self.connections.get_mut(vnode_id).unwrap();
+                Destination::Remote(client)
             }
         }
     }
