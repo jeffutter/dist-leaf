@@ -65,7 +65,7 @@ impl Encode for KVRequest {
 }
 
 impl Decode for KVRequest {
-    #[instrument]
+    #[instrument(skip(buf))]
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
             serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();
@@ -157,7 +157,7 @@ impl Encode for KVResponse {
 }
 
 impl Decode for KVResponse {
-    #[instrument]
+    #[instrument(skip(buf))]
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
             serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();

@@ -106,7 +106,7 @@ impl VNode {
         }
     }
 
-    #[instrument(skip(send_tx))]
+    #[instrument(skip(connection, send_tx))]
     async fn forward_to_remote(
         req: KVRequest,
         connection: &mut Box<dyn MessageClient<KVReq, KVRes>>,

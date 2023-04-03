@@ -2,6 +2,7 @@ use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
 use quic_transport::{Decode, Encode, RequestWithId, TransportError};
 use std::io::Write;
+use tracing::instrument;
 
 use crate::client_capnp;
 
@@ -12,6 +13,7 @@ pub enum KVRequestType {
 }
 
 impl Encode for KVRequestType {
+    #[instrument]
     fn encode(&self) -> Bytes {
         let mut message = ::capnp::message::Builder::new_default();
 
@@ -43,6 +45,7 @@ impl Encode for KVRequestType {
 }
 
 impl Decode for KVRequestType {
+    #[instrument(skip(buf))]
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
             serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();
@@ -94,6 +97,7 @@ pub enum KVResponseType {
 }
 
 impl Encode for KVResponseType {
+    #[instrument]
     fn encode(&self) -> Bytes {
         let mut message = ::capnp::message::Builder::new_default();
 
@@ -133,6 +137,7 @@ impl Encode for KVResponseType {
 }
 
 impl Decode for KVResponseType {
+    #[instrument(skip(buf))]
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
             serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();
