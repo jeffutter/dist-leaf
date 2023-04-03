@@ -15,8 +15,8 @@ use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
 use tokio::{
     select,
     sync::{mpsc, oneshot, Mutex},
-    time::Instant,
 };
+use tracing::instrument;
 use uuid::Uuid;
 
 /// NOTE: this certificate is to be used for demonstration purposes only!
@@ -90,23 +90,11 @@ impl VNode {
         })
     }
 
-    async fn handle_local(
-        req: KVReq,
-        storage: db::Database,
-        start: Instant,
-    ) -> Result<KVRes, ServerError> {
+    #[instrument]
+    async fn handle_local(req: KVReq, storage: db::Database) -> Result<KVRes, ServerError> {
         match req {
             KVReq::Get { key } => {
-                log::debug!("Serve Local");
-                log::debug!(
-                    "checked connection: {}µs",
-                    Instant::now().duration_since(start).as_micros()
-                );
                 let res_data = storage.get(&key)?;
-                log::debug!(
-                    "fetched: {}µs",
-                    Instant::now().duration_since(start).as_micros()
-                );
                 let res = KVRes::Result { result: res_data };
                 Ok(res)
             }
@@ -116,6 +104,54 @@ impl VNode {
                 Ok(res)
             }
         }
+    }
+
+    #[instrument(skip(send_tx))]
+    async fn forward_to_remote(
+        req: KVRequest,
+        connection: &mut Box<dyn MessageClient<KVReq, KVRes>>,
+        send_tx: mpsc::Sender<Bytes>,
+    ) -> Result<(), ServerError> {
+        let id = req.id().clone();
+        let res = connection.request(req.into()).await?;
+        let res = RequestWithId::new(id, res);
+        let res: KVResponse = res.into();
+        let encoded = res.encode();
+        send_tx.send(encoded).await.expect("stream should be open");
+        Ok(())
+    }
+
+    #[instrument(skip(send_tx))]
+    async fn handle_local_req(
+        req: KVRequest,
+        storage: db::Database,
+        send_tx: mpsc::Sender<Bytes>,
+    ) -> Result<(), ServerError> {
+        let id = req.id().clone();
+        let res = Self::handle_local(req.into(), storage).await?;
+        let res = RequestWithId::new(id, res);
+        let res: KVResponse = res.into();
+        let encoded = res.encode();
+        send_tx.send(encoded).await.expect("stream should be open");
+        Ok(())
+    }
+
+    #[instrument(skip(connections, send_tx))]
+    async fn handle_request(
+        req: KVRequest,
+        connections: Arc<Mutex<S2SConnections>>,
+        storage: db::Database,
+        send_tx: mpsc::Sender<Bytes>,
+    ) -> Result<(), ServerError> {
+        match connections.lock().await.get(req.key()) {
+            Destination::Remote(connection) => {
+                Self::forward_to_remote(req, connection, send_tx).await?;
+            }
+            Destination::Local => {
+                Self::handle_local_req(req, storage, send_tx).await?;
+            }
+        }
+        Ok::<(), ServerError>(())
     }
 
     fn handle_stream(
@@ -144,36 +180,7 @@ impl VNode {
                 let connections = connections.clone();
                 let send_tx = send_tx.clone();
                 tokio::spawn(async move {
-                    let start = Instant::now();
-
-                    match connections.lock().await.get(req.key()) {
-                        Destination::Remote(connection) => {
-                            log::debug!("Forward to Remote:   {:?}", connection);
-                            log::debug!("Forwarding Data:     {:?}", req);
-                            let id = req.id().clone();
-                            let res = connection.request(req.into()).await?;
-                            let res = RequestWithId::new(id, res);
-                            let res: KVResponse = res.into();
-                            let encoded = res.encode();
-                            send_tx.send(encoded).await.expect("stream should be open");
-                            log::debug!("Found on Remote:     {:?}", res);
-                        }
-                        Destination::Local => {
-                            log::debug!("Handle Local");
-                            let id = req.id().clone();
-                            let res = Self::handle_local(req.into(), storage, start).await?;
-                            let res = RequestWithId::new(id, res);
-                            let res: KVResponse = res.into();
-                            let encoded = res.encode();
-                            log::debug!("Eencoded Local");
-                            send_tx.send(encoded).await.expect("stream should be open");
-                            log::debug!(
-                                "sent: {}µs",
-                                Instant::now().duration_since(start).as_micros()
-                            );
-                        }
-                    }
-                    Ok::<(), ServerError>(())
+                    Self::handle_request(req, connections, storage, send_tx).await
                 });
             }
         }
@@ -185,9 +192,7 @@ impl VNode {
         storage: db::Database,
     ) -> impl Future<Output = ()> {
         async move {
-            log::debug!("New Connection");
             while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
-                log::debug!("New Stream");
                 tokio::spawn(Self::handle_stream(
                     stream,
                     connections.clone(),
@@ -213,12 +218,8 @@ impl VNode {
                 }
                 Some((req, tx)) = self.rx.recv() => {
                     tokio::spawn(async move {
-                        let start = Instant::now();
-                        log::debug!("Handling Local Data: {:?}", req);
-                        let res = Self::handle_local(req, storage, start).await?;
-                        log::debug!("Sending Local Data: {:?}", res.clone());
+                        let res = Self::handle_local(req, storage).await?;
                         tx.send(res.clone()).expect("channel should be open");
-                        log::debug!("Sent Local Data: {:?}", res);
 
                         Ok::<(), ServerError>(())
                     });

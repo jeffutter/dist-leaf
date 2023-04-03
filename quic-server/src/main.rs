@@ -41,6 +41,8 @@ pub enum ServerError {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // let subscriber = tracing_subscriber::FmtSubscriber::new();
+    // tracing::subscriber::set_global_default(subscriber)?;
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     let local_ip = match local_ip_address::local_ip()? {

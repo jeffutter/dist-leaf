@@ -5,6 +5,7 @@ use std::io::Write;
 use thiserror::Error;
 use tokio::io;
 use tokio::sync::oneshot;
+use tracing::instrument;
 
 use crate::server_capnp;
 
@@ -32,6 +33,7 @@ impl KVRequest {
 }
 
 impl Encode for KVRequest {
+    #[instrument]
     fn encode(&self) -> Bytes {
         let mut message = ::capnp::message::Builder::new_default();
 
@@ -63,6 +65,7 @@ impl Encode for KVRequest {
 }
 
 impl Decode for KVRequest {
+    #[instrument]
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
             serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();
@@ -114,6 +117,7 @@ pub enum KVResponse {
 }
 
 impl Encode for KVResponse {
+    #[instrument]
     fn encode(&self) -> Bytes {
         let mut message = ::capnp::message::Builder::new_default();
 
@@ -153,6 +157,7 @@ impl Encode for KVResponse {
 }
 
 impl Decode for KVResponse {
+    #[instrument]
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
             serialize::read_message(buf.reader(), ::capnp::message::ReaderOptions::new()).unwrap();

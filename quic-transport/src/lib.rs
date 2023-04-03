@@ -15,10 +15,8 @@ use std::{
     task::{Context, Poll},
 };
 use thiserror::Error;
-use tokio::{
-    sync::{mpsc, oneshot, Mutex},
-    time::Instant,
-};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tracing::instrument;
 
 #[derive(Error, Debug)]
 pub enum TransportError {
@@ -52,6 +50,7 @@ impl ProtoReader {
         self.buf.truncate(old_len + data.len());
     }
 
+    #[instrument(skip(self))]
     pub fn read_message(&mut self) -> Option<Bytes> {
         let mut bytes_to_read: usize = 4;
         let mut size_data = self.buf.clone();
@@ -61,7 +60,6 @@ impl ProtoReader {
         }
 
         let num_segments = size_data.get_u32_le() + 1;
-        log::debug!("Segments: {}", num_segments);
 
         for _ in 0..num_segments {
             bytes_to_read += (size_data.get_u32_le() * 8) as usize;
@@ -71,10 +69,7 @@ impl ProtoReader {
             bytes_to_read += 4;
         }
 
-        log::debug!("{} > {}", bytes_to_read, self.buf.remaining());
-
         if bytes_to_read > self.buf.remaining() {
-            log::debug!("Full Message not In Buffer");
             return None;
         }
 
@@ -114,7 +109,7 @@ impl futures::stream::Stream for DataStream {
             }
             Ok(None) => Poll::Ready(None),
             Err(e) => {
-                log::debug!("Stream: Error");
+                log::warn!("Stream: Error");
                 Poll::Ready(Some(Err(e.into())))
             }
         }
@@ -234,30 +229,17 @@ where
     Res: From<ResT> + Send + Sync + Debug,
     Req: Send + Sync + Debug,
 {
+    #[instrument(skip(self), fields(message_client = "Quic"))]
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
-        let start = Instant::now();
         let id = self
             .request_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let kvrt: ReqT = RequestWithId::new(id, req).into();
         let encoded = kvrt.encode();
-        log::debug!("Encoded Data: {:?}", encoded);
-        log::debug!(
-            "encoded: {}µs",
-            Instant::now().duration_since(start).as_micros()
-        );
         self.send_stream.send(encoded).await.unwrap();
         let (tx, rx) = oneshot::channel();
         self.pending_requests.lock().await.insert(id, tx);
-        log::debug!(
-            "sent: {}µs",
-            Instant::now().duration_since(start).as_micros()
-        );
         let result = rx.await.expect("channel should be open");
-        log::debug!(
-            "received: {}µs",
-            Instant::now().duration_since(start).as_micros()
-        );
         Ok(result.into())
     }
 }
@@ -283,6 +265,7 @@ where
     Req: Debug + Send,
     Res: Debug + Send,
 {
+    #[instrument(skip(self), fields(message_client = "Channel"))]
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
         let (tx, rx) = oneshot::channel();
         self.server
