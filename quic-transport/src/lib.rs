@@ -1,21 +1,17 @@
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use futures::StreamExt;
-use s2n_quic::{
-    stream::{ReceiveStream, SendStream},
-    Connection,
-};
+use s2n_quic::{connection::Handle, stream::ReceiveStream};
 use std::{
-    collections::HashMap,
     convert::From,
     fmt::Debug,
     marker::{PhantomData, Send},
     pin::Pin,
-    sync::{atomic::AtomicU64, Arc},
+    sync::atomic::AtomicU64,
     task::{Context, Poll},
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot};
 use tracing::instrument;
 
 #[derive(Error, Debug)]
@@ -175,48 +171,48 @@ impl<'a, D> From<ReceiveStream> for MessageStream<'a, D> {
 #[async_trait]
 pub trait MessageClient<Req, Res>: Send + Sync + Debug {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError>;
+    fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>>;
 }
 
 #[derive(Debug)]
 pub struct QuicMessageClient<Req, ReqT, Res, ResT> {
-    pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<ResT>>>>,
     request_counter: AtomicU64,
-    send_stream: SendStream,
+    handle: Handle,
     phantom1: PhantomData<Req>,
     phantom2: PhantomData<Res>,
     phantom3: PhantomData<ReqT>,
+    phantom4: PhantomData<ResT>,
 }
+
+// impl<Req, ReqT, Res, ResT> Clone for QuicMessageClient<Req, ReqT, Res, ResT> {
+//     fn clone(&self) -> QuicMessageClient<Req, ReqT, Res, ResT> {
+//         QuicMessageClient {
+//             handle: self.handle.clone(),
+//             request_counter: AtomicU64::new(0),
+//             phantom1: PhantomData,
+//             phantom2: PhantomData,
+//             phantom3: PhantomData,
+//             phantom4: PhantomData,
+//         }
+//     }
+// }
 
 impl<Req, ReqT, Res, ResT> QuicMessageClient<Req, ReqT, Res, ResT>
 where
     ReqT: Encode + Decode + Debug + From<RequestWithId<Req>>,
     ResT: Encode + Decode + Debug + Sync + Send + 'static,
 {
-    pub async fn new(connection: Arc<Mutex<Connection>>) -> Result<Self, TransportError> {
-        // open a new stream and split the receiving and sending sides
-        let stream = connection.lock().await.open_bidirectional_stream().await?;
-        let (receive_stream, send_stream) = stream.split();
-
-        let pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<ResT>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        let pending_requests1 = pending_requests.clone();
-        tokio::spawn(async move {
-            let mut response_stream: MessageStream<ResT> = receive_stream.into();
-            while let Some(Ok((req, _data))) = response_stream.next().await {
-                let tx = pending_requests1.lock().await.remove(req.id()).unwrap();
-                tx.send(req).unwrap();
-            }
-        });
-
+    pub async fn new(connection: Handle) -> Result<Self, TransportError> {
         Ok(Self {
-            send_stream,
-            pending_requests,
-
+            // send_stream,
+            handle: connection,
+            // pending_requests,
+            //
             request_counter: AtomicU64::new(0),
             phantom1: PhantomData,
             phantom2: PhantomData,
             phantom3: PhantomData,
+            phantom4: PhantomData,
         })
     }
 }
@@ -224,29 +220,54 @@ where
 #[async_trait]
 impl<Req, ReqT, Res, ResT> MessageClient<Req, Res> for QuicMessageClient<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode + From<RequestWithId<Req>> + Send + Sync + Debug,
+    ReqT: Encode + Decode + From<RequestWithId<Req>> + Send + Sync + Debug + 'static,
     ResT: Encode + Decode + Debug + Send + Sync + Debug + 'static,
-    Res: From<ResT> + Send + Sync + Debug,
-    Req: Send + Sync + Debug,
+    Res: From<ResT> + Send + Sync + Debug + 'static,
+    Req: Send + Sync + Debug + 'static,
 {
     #[instrument(skip(self), fields(message_client = "Quic"))]
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
+        let stream = self.handle.open_bidirectional_stream().await?;
+        let (receive_stream, mut send_stream) = stream.split();
+
         let id = self
             .request_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let kvrt: ReqT = RequestWithId::new(id, req).into();
         let encoded = kvrt.encode();
-        self.send_stream.send(encoded).await.unwrap();
-        let (tx, rx) = oneshot::channel();
-        self.pending_requests.lock().await.insert(id, tx);
-        let result = rx.await.expect("channel should be open");
+        send_stream.send(encoded).await.unwrap();
+        let mut response_stream: MessageStream<ResT> = receive_stream.into();
+        let (result, _data) = response_stream
+            .next()
+            .await
+            .expect("stream should be open")?;
+
         Ok(result.into())
+    }
+
+    fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>> {
+        Box::new(QuicMessageClient {
+            handle: self.handle.clone(),
+            request_counter: AtomicU64::new(0),
+            phantom1: PhantomData,
+            phantom2: PhantomData,
+            phantom3: PhantomData::<ReqT>,
+            phantom4: PhantomData::<ResT>,
+        })
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ChannelMessageClient<Req, Res> {
     server: mpsc::Sender<(Req, oneshot::Sender<Res>)>,
+}
+
+impl<Req, Res> Clone for ChannelMessageClient<Req, Res> {
+    fn clone(&self) -> ChannelMessageClient<Req, Res> {
+        ChannelMessageClient {
+            server: self.server.clone(),
+        }
+    }
 }
 
 impl<Req, Res> ChannelMessageClient<Req, Res>
@@ -262,8 +283,8 @@ where
 #[async_trait]
 impl<Req, Res> MessageClient<Req, Res> for ChannelMessageClient<Req, Res>
 where
-    Req: Debug + Send,
-    Res: Debug + Send,
+    Req: Debug + Send + 'static,
+    Res: Debug + Send + 'static,
 {
     #[instrument(skip(self), fields(message_client = "Channel"))]
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
@@ -275,6 +296,12 @@ where
         let result = rx.await.expect("channel should be open");
 
         Ok(result)
+    }
+
+    fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>> {
+        Box::new(ChannelMessageClient {
+            server: self.server.clone(),
+        })
     }
 }
 

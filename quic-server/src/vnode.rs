@@ -6,17 +6,19 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::{Future, StreamExt};
+use itertools::Itertools;
 use quic_client::DistKVClient;
 use quic_transport::{
     ChannelMessageClient, DataStream, Decode, Encode, MessageClient, MessageStream, RequestWithId,
 };
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
-use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
+use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
 use tokio::{
     select,
     sync::{mpsc, oneshot, Mutex},
+    task::JoinSet,
 };
-use tracing::instrument;
+use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
 /// NOTE: this certificate is to be used for demonstration purposes only!
@@ -24,7 +26,13 @@ pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/.
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static KEY_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/key.pem"));
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+static REPLICATION_FACTOR: usize = 3;
+static CONSISTENCY_LEVEL: usize = match (REPLICATION_FACTOR / 2, REPLICATION_FACTOR % 2) {
+    (n, 0) => n,
+    (n, _) => n + 1,
+};
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub(crate) struct VNodeId {
     pub(crate) node_id: Uuid,
     pub(crate) core_id: Uuid,
@@ -109,7 +117,7 @@ impl VNode {
     #[instrument(skip(connection, send_tx))]
     async fn forward_to_remote(
         req: KVRequest,
-        connection: &mut Box<dyn MessageClient<KVReq, KVRes>>,
+        mut connection: Box<dyn MessageClient<KVReq, KVRes>>,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
         let id = req.id().clone();
@@ -143,14 +151,108 @@ impl VNode {
         storage: db::Database,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
-        match connections.lock().await.get(req.key()) {
-            Destination::Remote(connection) => {
-                Self::forward_to_remote(req, connection, send_tx).await?;
-            }
-            Destination::Local => {
-                Self::handle_local_req(req, storage, send_tx).await?;
-            }
+        let mut set: JoinSet<Result<KVResponse, ServerError>> = JoinSet::new();
+        let mut cs = connections.lock().await;
+        let replicas = cs.replicas(req.key(), REPLICATION_FACTOR).await;
+
+        let local = replicas.iter().filter(|destination| match destination {
+            Destination::Local => true,
+            _ => false,
+        });
+
+        let remote = replicas
+            .iter()
+            .filter_map(|destination| match destination {
+                Destination::Remote(conn) => Some(conn.box_clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        if local.count() > 0 {
+            let req = req.clone();
+            let storage = storage.clone();
+            set.spawn({
+                async move {
+                    let id = req.id().clone();
+                    let res = Self::handle_local(req.into(), storage).await?;
+                    let res = RequestWithId::new(id, res);
+                    let res: KVResponse = res.into();
+                    Ok::<KVResponse, ServerError>(res)
+                }
+            });
         }
+
+        for connection in remote {
+            let req = req.clone();
+
+            set.spawn({
+                async move {
+                    let id = req.id().clone();
+                    let res = connection.box_clone().request(req.into()).await?;
+                    let res = RequestWithId::new(id, res);
+                    let res: KVResponse = res.into();
+
+                    Ok::<KVResponse, ServerError>(res)
+                }
+            });
+        }
+
+        let mut results: Mutex<Vec<Option<Result<KVResponse, ServerError>>>> =
+            Mutex::new(Vec::new());
+        let mut idx = 0;
+
+        while let Some(res) = set.join_next().await {
+            let results = results.get_mut();
+
+            match res {
+                Ok(Ok(res)) => {
+                    results.push(Some(Ok(res)));
+                }
+                Ok(Err(e)) => {
+                    results.push(Some(Err(e)));
+                }
+                Err(_e) => results.push(Some(Err(ServerError::Unknown))),
+            }
+
+            if idx >= (CONSISTENCY_LEVEL - 1) {
+                let unique_res: Vec<KVResponse> = results
+                    .iter()
+                    .filter_map(|x| match x {
+                        Some(Ok(res)) => Some(res.clone()),
+                        _ => None,
+                    })
+                    .unique()
+                    .collect();
+
+                if unique_res.len() == 1 {
+                    let res = &unique_res[0];
+
+                    send_tx
+                        .send(res.encode())
+                        .await
+                        .expect("channel should be open");
+
+                    event!(Level::INFO, "Results matched with {} request(s)", idx + 1);
+
+                    break;
+                } else if idx == REPLICATION_FACTOR {
+                    let res = KVResponse::Error {
+                        id: *req.id(),
+                        error: "Results did not match".to_string(),
+                    };
+
+                    send_tx
+                        .send(res.encode())
+                        .await
+                        .expect("channel should be open");
+
+                    event!(Level::ERROR, "Results did not match");
+                }
+            }
+
+            idx += 1;
+        }
+
         Ok::<(), ServerError>(())
     }
 
@@ -229,7 +331,8 @@ impl VNode {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum Destination<'a> {
-    Remote(&'a mut Box<dyn MessageClient<KVReq, KVRes>>),
+    Remote(&'a Box<dyn MessageClient<KVReq, KVRes>>),
     Local,
 }

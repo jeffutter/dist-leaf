@@ -1154,6 +1154,7 @@ dependencies = [
  "db",
  "env_logger",
  "futures",
+ "itertools",
  "local-ip-address",
  "log",
  "mdns-sd",

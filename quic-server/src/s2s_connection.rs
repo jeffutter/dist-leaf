@@ -64,9 +64,34 @@ impl S2SConnections {
         match vnode_id {
             vnode_id if vnode_id == &self.vnode_id => Destination::Local,
             vnode_id => {
-                let client = self.connections.get_mut(vnode_id).unwrap();
+                let client = self.connections.get(vnode_id).unwrap();
                 Destination::Remote(client)
             }
         }
+    }
+
+    pub(crate) async fn replicas(&mut self, key: &str, n: usize) -> Vec<Destination> {
+        let my_vnode_id = &self.vnode_id.clone();
+
+        let nodes: Vec<_> = self.ring.replicas(key).take(n).collect();
+
+        let local = nodes.iter().any(|vnode_id| vnode_id == &my_vnode_id);
+        let remote: Vec<_> = nodes
+            .into_iter()
+            .filter(|vnode_id| vnode_id != &my_vnode_id)
+            .collect();
+
+        let mut res: Vec<Destination> = Vec::new();
+
+        if local {
+            res.push(Destination::Local);
+        }
+
+        for vnode_id in remote {
+            let client = self.connections.get(vnode_id).unwrap();
+            res.push(Destination::Remote(&client))
+        }
+
+        return res;
     }
 }

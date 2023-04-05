@@ -1,11 +1,11 @@
 pub mod protocol;
 
 use quic_transport::{Decode, Encode, QuicMessageClient, RequestWithId, TransportError};
+use s2n_quic::connection::Handle;
 use s2n_quic::{client::Connect, Client, Connection};
 use std::fmt::Debug;
-use std::{marker::PhantomData, net::SocketAddr, sync::Arc};
+use std::{marker::PhantomData, net::SocketAddr};
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 pub mod client_capnp {
     include!(concat!(env!("OUT_DIR"), "/client_capnp.rs"));
@@ -72,9 +72,9 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DistKVConnection<Req, ReqT, Res, ResT> {
-    connection: Arc<Mutex<Connection>>,
+    connection: Handle,
     req: PhantomData<Req>,
     res: PhantomData<Res>,
     reqt: PhantomData<ReqT>,
@@ -88,7 +88,7 @@ where
 {
     pub async fn new(connection: Connection) -> Self {
         Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: connection.handle(),
             req: PhantomData,
             res: PhantomData,
             reqt: PhantomData,

@@ -109,7 +109,7 @@ impl Decode for KVRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KVResponse {
     Error { id: u64, error: String },
     Result { id: u64, result: Option<String> },
