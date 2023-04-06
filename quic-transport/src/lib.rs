@@ -184,30 +184,14 @@ pub struct QuicMessageClient<Req, ReqT, Res, ResT> {
     phantom4: PhantomData<ResT>,
 }
 
-// impl<Req, ReqT, Res, ResT> Clone for QuicMessageClient<Req, ReqT, Res, ResT> {
-//     fn clone(&self) -> QuicMessageClient<Req, ReqT, Res, ResT> {
-//         QuicMessageClient {
-//             handle: self.handle.clone(),
-//             request_counter: AtomicU64::new(0),
-//             phantom1: PhantomData,
-//             phantom2: PhantomData,
-//             phantom3: PhantomData,
-//             phantom4: PhantomData,
-//         }
-//     }
-// }
-
 impl<Req, ReqT, Res, ResT> QuicMessageClient<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode + Debug + From<RequestWithId<Req>>,
+    ReqT: Encode + Decode + Debug + From<RequestWithMetadata<Req>>,
     ResT: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Handle) -> Result<Self, TransportError> {
         Ok(Self {
-            // send_stream,
             handle: connection,
-            // pending_requests,
-            //
             request_counter: AtomicU64::new(0),
             phantom1: PhantomData,
             phantom2: PhantomData,
@@ -220,7 +204,7 @@ where
 #[async_trait]
 impl<Req, ReqT, Res, ResT> MessageClient<Req, Res> for QuicMessageClient<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode + From<RequestWithId<Req>> + Send + Sync + Debug + 'static,
+    ReqT: Encode + Decode + From<RequestWithMetadata<Req>> + Send + Sync + Debug + 'static,
     ResT: Encode + Decode + Debug + Send + Sync + Debug + 'static,
     Res: From<ResT> + Send + Sync + Debug + 'static,
     Req: Send + Sync + Debug + 'static,
@@ -233,7 +217,7 @@ where
         let id = self
             .request_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let kvrt: ReqT = RequestWithId::new(id, req).into();
+        let kvrt: ReqT = RequestWithMetadata::new(id, req).into();
         let encoded = kvrt.encode();
         send_stream.send(encoded).await.unwrap();
         let mut response_stream: MessageStream<ResT> = receive_stream.into();
@@ -305,12 +289,12 @@ where
     }
 }
 
-pub struct RequestWithId<Req> {
+pub struct RequestWithMetadata<Req> {
     pub id: u64,
     pub request: Req,
 }
 
-impl<Req> RequestWithId<Req> {
+impl<Req> RequestWithMetadata<Req> {
     pub fn new(id: u64, request: Req) -> Self {
         Self { id, request }
     }

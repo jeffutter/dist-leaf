@@ -9,7 +9,8 @@ use futures::{Future, StreamExt};
 use itertools::Itertools;
 use quic_client::DistKVClient;
 use quic_transport::{
-    ChannelMessageClient, DataStream, Decode, Encode, MessageClient, MessageStream, RequestWithId,
+    ChannelMessageClient, DataStream, Decode, Encode, MessageClient, MessageStream,
+    RequestWithMetadata,
 };
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
@@ -122,7 +123,7 @@ impl VNode {
     ) -> Result<(), ServerError> {
         let id = req.id().clone();
         let res = connection.request(req.into()).await?;
-        let res = RequestWithId::new(id, res);
+        let res = RequestWithMetadata::new(id, res);
         let res: KVResponse = res.into();
         let encoded = res.encode();
         send_tx.send(encoded).await.expect("stream should be open");
@@ -137,7 +138,7 @@ impl VNode {
     ) -> Result<(), ServerError> {
         let id = req.id().clone();
         let res = Self::handle_local(req.into(), storage).await?;
-        let res = RequestWithId::new(id, res);
+        let res = RequestWithMetadata::new(id, res);
         let res: KVResponse = res.into();
         let encoded = res.encode();
         send_tx.send(encoded).await.expect("stream should be open");
@@ -175,7 +176,7 @@ impl VNode {
                 async move {
                     let id = req.id().clone();
                     let res = Self::handle_local(req.into(), storage).await?;
-                    let res = RequestWithId::new(id, res);
+                    let res = RequestWithMetadata::new(id, res);
                     let res: KVResponse = res.into();
                     Ok::<KVResponse, ServerError>(res)
                 }
@@ -189,7 +190,7 @@ impl VNode {
                 async move {
                     let id = req.id().clone();
                     let res = connection.box_clone().request(req.into()).await?;
-                    let res = RequestWithId::new(id, res);
+                    let res = RequestWithMetadata::new(id, res);
                     let res: KVResponse = res.into();
 
                     Ok::<KVResponse, ServerError>(res)
@@ -199,22 +200,17 @@ impl VNode {
 
         let mut results: Mutex<Vec<Option<Result<KVResponse, ServerError>>>> =
             Mutex::new(Vec::new());
-        let mut idx = 0;
 
         while let Some(res) = set.join_next().await {
             let results = results.get_mut();
 
             match res {
-                Ok(Ok(res)) => {
-                    results.push(Some(Ok(res)));
-                }
-                Ok(Err(e)) => {
-                    results.push(Some(Err(e)));
-                }
+                Ok(Ok(res)) => results.push(Some(Ok(res))),
+                Ok(Err(e)) => results.push(Some(Err(e))),
                 Err(_e) => results.push(Some(Err(ServerError::Unknown))),
             }
 
-            if idx >= (CONSISTENCY_LEVEL - 1) {
+            if results.len() >= CONSISTENCY_LEVEL {
                 let unique_res: Vec<KVResponse> = results
                     .iter()
                     .filter_map(|x| match x {
@@ -232,15 +228,18 @@ impl VNode {
                         .await
                         .expect("channel should be open");
 
-                    event!(Level::INFO, "Results matched with {} request(s)", idx + 1);
+                    event!(
+                        Level::INFO,
+                        "Results matched with {} request(s)",
+                        results.len()
+                    );
 
                     break;
-                } else if idx == REPLICATION_FACTOR {
+                } else if results.len() == REPLICATION_FACTOR {
                     let res = KVResponse::Error {
                         id: *req.id(),
                         error: "Results did not match".to_string(),
                     };
-
                     send_tx
                         .send(res.encode())
                         .await
@@ -249,8 +248,6 @@ impl VNode {
                     event!(Level::ERROR, "Results did not match");
                 }
             }
-
-            idx += 1;
         }
 
         Ok::<(), ServerError>(())

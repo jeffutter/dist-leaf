@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
-use quic_transport::{Decode, Encode, RequestWithId, TransportError};
+use quic_transport::{Decode, Encode, RequestWithMetadata, TransportError};
 use std::io::Write;
 use thiserror::Error;
 use tokio::io;
@@ -233,8 +233,8 @@ impl From<KVResponse> for KVRes {
     }
 }
 
-impl From<RequestWithId<KVReq>> for KVRequest {
-    fn from(req_with_id: RequestWithId<KVReq>) -> Self {
+impl From<RequestWithMetadata<KVReq>> for KVRequest {
+    fn from(req_with_id: RequestWithMetadata<KVReq>) -> Self {
         match req_with_id.request {
             KVReq::Get { key } => KVRequest::Get {
                 id: req_with_id.id,
@@ -249,8 +249,8 @@ impl From<RequestWithId<KVReq>> for KVRequest {
     }
 }
 
-impl From<RequestWithId<KVRes>> for KVResponse {
-    fn from(res_with_id: RequestWithId<KVRes>) -> Self {
+impl From<RequestWithMetadata<KVRes>> for KVResponse {
+    fn from(res_with_id: RequestWithMetadata<KVRes>) -> Self {
         match res_with_id.request {
             KVRes::Error { error } => KVResponse::Error {
                 id: res_with_id.id,

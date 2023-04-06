@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
-use quic_transport::{Decode, Encode, RequestWithId, TransportError};
+use quic_transport::{Decode, Encode, RequestWithMetadata, TransportError};
 use std::io::Write;
 use tracing::instrument;
 
@@ -194,14 +194,14 @@ pub enum KVResponse {
     Ok,
 }
 
-impl From<RequestWithId<KVRequestType>> for KVRequestType {
-    fn from(req_with_id: RequestWithId<KVRequestType>) -> Self {
+impl From<RequestWithMetadata<KVRequestType>> for KVRequestType {
+    fn from(req_with_id: RequestWithMetadata<KVRequestType>) -> Self {
         req_with_id.request
     }
 }
 
-impl From<RequestWithId<KVResponseType>> for KVResponseType {
-    fn from(res_with_id: RequestWithId<KVResponseType>) -> Self {
+impl From<RequestWithMetadata<KVResponseType>> for KVResponseType {
+    fn from(res_with_id: RequestWithMetadata<KVResponseType>) -> Self {
         res_with_id.request
     }
 }
@@ -216,8 +216,8 @@ impl From<KVResponseType> for KVResponse {
     }
 }
 
-impl From<RequestWithId<KVRequest>> for KVRequestType {
-    fn from(req_with_id: RequestWithId<KVRequest>) -> Self {
+impl From<RequestWithMetadata<KVRequest>> for KVRequestType {
+    fn from(req_with_id: RequestWithMetadata<KVRequest>) -> Self {
         match req_with_id.request {
             KVRequest::Get { key } => KVRequestType::Get {
                 id: req_with_id.id,
@@ -232,8 +232,8 @@ impl From<RequestWithId<KVRequest>> for KVRequestType {
     }
 }
 
-impl From<RequestWithId<KVResponse>> for KVResponseType {
-    fn from(res_with_id: RequestWithId<KVResponse>) -> Self {
+impl From<RequestWithMetadata<KVResponse>> for KVResponseType {
+    fn from(res_with_id: RequestWithMetadata<KVResponse>) -> Self {
         match res_with_id.request {
             KVResponse::Error { error } => KVResponseType::Error {
                 id: res_with_id.id,

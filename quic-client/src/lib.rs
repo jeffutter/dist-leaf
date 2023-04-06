@@ -1,6 +1,6 @@
 pub mod protocol;
 
-use quic_transport::{Decode, Encode, QuicMessageClient, RequestWithId, TransportError};
+use quic_transport::{Decode, Encode, QuicMessageClient, RequestWithMetadata, TransportError};
 use s2n_quic::connection::Handle;
 use s2n_quic::{client::Connect, Client, Connection};
 use std::fmt::Debug;
@@ -36,7 +36,7 @@ pub struct DistKVClient<Req, ReqT, Res, ResT> {
 
 impl<Req, ReqT, Res, ResT> DistKVClient<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode + Debug + From<RequestWithId<Req>> + Send,
+    ReqT: Encode + Decode + Debug + From<RequestWithMetadata<Req>> + Send,
     ResT: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub fn new() -> Result<Self, ClientError> {
@@ -83,7 +83,7 @@ pub struct DistKVConnection<Req, ReqT, Res, ResT> {
 
 impl<Req, ReqT, Res, ResT> DistKVConnection<Req, ReqT, Res, ResT>
 where
-    ReqT: Encode + Decode + Debug + From<RequestWithId<Req>> + Send,
+    ReqT: Encode + Decode + Debug + From<RequestWithMetadata<Req>> + Send,
     ResT: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Connection) -> Self {
