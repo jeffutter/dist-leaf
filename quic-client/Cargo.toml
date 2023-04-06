@@ -17,6 +17,7 @@ quic-transport = { path = "../quic-transport" }
 bytes = "1"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3"
+mdns-sd = "0.7.1"
 
 [build-dependencies]
 capnpc = "0.16"

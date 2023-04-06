@@ -1,10 +1,11 @@
+mod mdns;
 mod protocol;
 
 use env_logger::Env;
 use protocol::{KVRequest, KVRequestType, KVResponse, KVResponseType};
 use quic_client::DistKVClient;
 use quic_transport::MessageClient;
-use std::{error::Error, net::SocketAddr, thread};
+use std::{error::Error, thread};
 use tokio::sync::mpsc::channel;
 
 pub mod client_capnp {
@@ -16,13 +17,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // tracing_subscriber::fmt::init();
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let port = args.get(1).unwrap();
+    let mdns = mdns::MDNS::new();
+    let _mdns_jh = mdns.spawn().await;
+    let mut mdns_rx = mdns.rx.clone();
+    println!("Discovering Server via MDNS");
+    mdns_rx.changed().await?;
+    let server_cons = mdns.rx.borrow();
+    let addr = server_cons.iter().next().unwrap();
+    println!("Client Found: {:?}", addr);
 
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
     let client: DistKVClient<KVRequest, KVRequestType, KVResponse, KVResponseType> =
         DistKVClient::new()?;
-    let connection = client.connect(addr).await?;
+    let connection = client.connect(*addr).await?;
     let mut stream = connection.stream().await?;
 
     println!("Client Ready");

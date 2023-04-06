@@ -1134,6 +1134,7 @@ dependencies = [
  "env_logger",
  "futures",
  "log",
+ "mdns-sd",
  "quic-transport",
  "s2n-quic",
  "thiserror",
