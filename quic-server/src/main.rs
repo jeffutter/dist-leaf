@@ -1,6 +1,7 @@
-mod mdns;
+mod client_mdns;
 mod protocol;
 mod s2s_connection;
+mod s2s_mdns;
 mod vnode;
 
 use db::DatabaseError;
@@ -95,7 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     rt.block_on(async {
                         let mut vnode = VNode::new(node_id, core_id, local_ip, rx, core_to_cmc)?;
 
-                        let _ = vnode.mdns.spawn();
+                        let _ = vnode.s2s_mdns.spawn().await;
                         vnode.run().await?;
 
                         Ok::<(), ServerError>(())

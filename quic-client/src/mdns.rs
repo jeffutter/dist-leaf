@@ -16,7 +16,7 @@ pub struct MDNS {
 impl MDNS {
     pub(crate) fn new() -> Self {
         let mdns = ServiceDaemon::new().expect("Failed to create daemon");
-        let service_type = "_mdns-quic-db._udp.local.";
+        let service_type = "_quic-db-pub._udp.local.";
         let receiver = mdns.browse(service_type).expect("Failed to browse");
         let connections = Arc::new(Mutex::new(HashSet::new()));
 

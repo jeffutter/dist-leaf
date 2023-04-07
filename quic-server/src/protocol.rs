@@ -1,5 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
+use quic_client::protocol::KVRequestType;
 use quic_transport::{Decode, Encode, RequestWithMetadata, TransportError};
 use std::io::Write;
 use thiserror::Error;
@@ -219,6 +220,15 @@ impl From<KVRequest> for KVReq {
         match req {
             KVRequest::Get { key, .. } => KVReq::Get { key },
             KVRequest::Put { key, value, .. } => KVReq::Put { key, value },
+        }
+    }
+}
+
+impl From<KVRequestType> for KVReq {
+    fn from(req: KVRequestType) -> Self {
+        match req {
+            KVRequestType::Get { key, .. } => KVReq::Get { key },
+            KVRequestType::Put { key, value, .. } => KVReq::Put { key, value },
         }
     }
 }

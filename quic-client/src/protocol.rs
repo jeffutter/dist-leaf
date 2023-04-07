@@ -12,6 +12,15 @@ pub enum KVRequestType {
     Put { id: u64, key: String, value: String },
 }
 
+impl KVRequestType {
+    pub fn key(&self) -> &String {
+        match self {
+            KVRequestType::Get { key, .. } => key,
+            KVRequestType::Put { key, .. } => key,
+        }
+    }
+}
+
 impl Encode for KVRequestType {
     #[instrument]
     fn encode(&self) -> Bytes {
@@ -89,7 +98,7 @@ impl Decode for KVRequestType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KVResponseType {
     Error { id: u64, error: String },
     Result { id: u64, result: Option<String> },

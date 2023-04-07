@@ -174,7 +174,6 @@ pub trait MessageClient<Req, Res>: Send + Sync + Debug {
     fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>>;
 }
 
-#[derive(Debug)]
 pub struct QuicMessageClient<Req, ReqT, Res, ResT> {
     request_counter: AtomicU64,
     handle: Handle,
@@ -241,7 +240,14 @@ where
     }
 }
 
-#[derive(Debug)]
+impl<Req, ReqT, Res, ResT> Debug for QuicMessageClient<Req, ReqT, Res, ResT> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicMessageClient")
+            .field("socket", &self.handle.remote_addr().unwrap())
+            .finish()
+    }
+}
+
 pub struct ChannelMessageClient<Req, Res> {
     server: mpsc::Sender<(Req, oneshot::Sender<Res>)>,
 }
@@ -286,6 +292,12 @@ where
         Box::new(ChannelMessageClient {
             server: self.server.clone(),
         })
+    }
+}
+
+impl<Req, Res> Debug for ChannelMessageClient<Req, Res> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelMessageClient").finish()
     }
 }
 

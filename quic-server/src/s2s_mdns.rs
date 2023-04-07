@@ -11,13 +11,13 @@ use uuid::Uuid;
 use crate::{S2SConnections, ServerError, VNodeId};
 
 #[derive(Clone)]
-pub struct MDNS {
+pub struct S2SMDNS {
     receiver: Receiver<ServiceEvent>,
     local_socket_addr: SocketAddr,
     connections: Arc<Mutex<S2SConnections>>,
 }
 
-impl MDNS {
+impl S2SMDNS {
     pub(crate) fn new(
         node_id: Uuid,
         core_id: Uuid,
@@ -27,7 +27,7 @@ impl MDNS {
     ) -> Self {
         let local_socket_addr: SocketAddr = format!("{}:{}", local_ip, port).parse().unwrap();
         let mdns = ServiceDaemon::new().expect("Failed to create daemon");
-        let service_type = "_mdns-quic-db._udp.local.";
+        let service_type = "_quic-db-priv._udp.local.";
         let receiver = mdns.browse(service_type).expect("Failed to browse");
         let instance_name = format!("node-{}", core_id);
         let host_name = format!("{}.local.", local_ip);
