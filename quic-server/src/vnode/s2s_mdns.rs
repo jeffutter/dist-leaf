@@ -8,7 +8,7 @@ use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 use tokio::{sync::Mutex, task, time};
 use uuid::Uuid;
 
-use crate::{S2SConnections, ServerError, VNodeId};
+use crate::{s2s_connection::S2SConnections, ServerError, VNodeId};
 
 #[derive(Clone)]
 pub struct S2SMDNS {

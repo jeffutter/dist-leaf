@@ -1,13 +1,10 @@
-mod client_mdns;
 mod protocol;
 mod s2s_connection;
-mod s2s_mdns;
 mod vnode;
 
 use db::DatabaseError;
 use env_logger::Env;
 use quic_transport::{ChannelMessageClient, TransportError};
-use s2s_connection::S2SConnections;
 use std::{collections::HashMap, error::Error, thread};
 use thiserror::Error;
 use tokio::{
@@ -96,7 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     rt.block_on(async {
                         let mut vnode = VNode::new(node_id, core_id, local_ip, rx, core_to_cmc)?;
 
-                        let _ = vnode.s2s_mdns.spawn().await;
+                        let _ = vnode.s2s_server.mdns.spawn().await;
                         vnode.run().await?;
 
                         Ok::<(), ServerError>(())
