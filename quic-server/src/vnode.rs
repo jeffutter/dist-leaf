@@ -172,7 +172,7 @@ impl VNode {
         storage: db::Database,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
-        let mut set: JoinSet<Result<KVResponseType, ServerError>> = JoinSet::new();
+        let mut join_set: JoinSet<Result<KVResponseType, ServerError>> = JoinSet::new();
         let mut cs = connections.lock().await;
         let replicas = cs.replicas(req.key(), REPLICATION_FACTOR).await;
 
@@ -194,7 +194,7 @@ impl VNode {
         if local.count() > 0 {
             let req = req.clone();
             let storage = storage.clone();
-            set.spawn({
+            join_set.spawn({
                 async move {
                     let id = req.id().clone();
                     let res = Self::handle_local(req.into(), storage).await?;
@@ -211,7 +211,7 @@ impl VNode {
         for connection in remote {
             let req = req.clone();
 
-            set.spawn({
+            join_set.spawn({
                 async move {
                     let id = req.id().clone();
                     let res = connection.box_clone().request(req.into()).await?;
@@ -229,7 +229,7 @@ impl VNode {
         let mut results: Mutex<Vec<Option<Result<KVResponseType, ServerError>>>> =
             Mutex::new(Vec::new());
 
-        while let Some(res) = set.join_next().await {
+        while let Some(res) = join_set.join_next().await {
             let results = results.get_mut();
 
             match res {
@@ -281,6 +281,12 @@ impl VNode {
                     event!(Level::ERROR, results = ?results, "Results did not match");
                 }
             }
+        }
+
+        // For put requests, we want to let all of the writes finish, even if we've hit the
+        // requested Consistency Level
+        if let KVRequestType::Put { .. } = req {
+            join_set.detach_all();
         }
 
         Ok::<(), ServerError>(())
