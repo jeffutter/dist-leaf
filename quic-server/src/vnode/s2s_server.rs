@@ -4,10 +4,8 @@ use crate::{
     ServerError,
 };
 use bytes::Bytes;
-use futures::{Future, StreamExt};
-use quic_transport::{
-    DataStream, Decode, Encode, MessageClient, MessageStream, RequestWithMetadata,
-};
+use futures::StreamExt;
+use quic_transport::{DataStream, Decode, Encode, MessageStream, RequestWithMetadata};
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
 use std::{net::Ipv4Addr, sync::Arc};
 use tokio::{
@@ -81,21 +79,6 @@ impl S2SServer {
         }
     }
 
-    #[instrument(skip(connection, send_tx))]
-    async fn forward_to_remote(
-        req: KVRequest,
-        mut connection: Box<dyn MessageClient<KVReq, KVRes>>,
-        send_tx: mpsc::Sender<Bytes>,
-    ) -> Result<(), ServerError> {
-        let id = req.id().clone();
-        let res = connection.request(req.into()).await?;
-        let res = RequestWithMetadata::new(id, res);
-        let res: KVResponse = res.into();
-        let encoded = res.encode();
-        send_tx.send(encoded).await.expect("stream should be open");
-        Ok(())
-    }
-
     #[instrument(skip(send_tx))]
     async fn handle_local_req(
         req: KVRequest,
@@ -111,44 +94,32 @@ impl S2SServer {
         Ok(())
     }
 
-    fn handle_stream(
-        stream: BidirectionalStream,
-        storage: db::Database,
-    ) -> impl Future<Output = ()> {
-        async move {
-            let (receive_stream, mut send_stream) = stream.split();
-            let data_stream = DataStream::new(receive_stream);
-            let mut request_stream: MessageStream<KVRequest> = MessageStream::new(data_stream);
+    async fn handle_stream(stream: BidirectionalStream, storage: db::Database) {
+        let (receive_stream, mut send_stream) = stream.split();
+        let data_stream = DataStream::new(receive_stream);
+        let mut request_stream: MessageStream<KVRequest> = MessageStream::new(data_stream);
 
-            let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
-                mpsc::channel(100);
+        let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
+            mpsc::channel(100);
 
-            tokio::spawn(async move {
-                while let Some(data) = send_rx.recv().await {
-                    send_stream.send(data).await?;
-                }
-
-                Ok::<(), ServerError>(())
-            });
-
-            while let Some(Ok((req, _data))) = request_stream.next().await {
-                let storage = storage.clone();
-                let send_tx = send_tx.clone();
-                tokio::spawn(
-                    async move { Self::handle_local_req(req.into(), storage, send_tx).await },
-                );
+        tokio::spawn(async move {
+            while let Some(data) = send_rx.recv().await {
+                send_stream.send(data).await?;
             }
+
+            Ok::<(), ServerError>(())
+        });
+
+        while let Some(Ok((req, _data))) = request_stream.next().await {
+            let storage = storage.clone();
+            let send_tx = send_tx.clone();
+            tokio::spawn(async move { Self::handle_local_req(req.into(), storage, send_tx).await });
         }
     }
 
-    fn handle_connection(
-        mut connection: connection::Connection,
-        storage: db::Database,
-    ) -> impl Future<Output = ()> {
-        async move {
-            while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
-                tokio::spawn(Self::handle_stream(stream, storage.clone()));
-            }
+    async fn handle_connection(mut connection: connection::Connection, storage: db::Database) {
+        while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
+            tokio::spawn(Self::handle_stream(stream, storage.clone()));
         }
     }
 
