@@ -1,6 +1,6 @@
 use crate::{
+    message_clients::MessageClients,
     protocol::{KVReq, KVRequest, KVRes, KVResponse},
-    s2s_connection::S2SConnections,
     ServerError,
 };
 use bytes::Bytes;
@@ -36,7 +36,7 @@ impl S2SServer {
         local_ip: Ipv4Addr,
         rx: mpsc::Receiver<(KVReq, oneshot::Sender<KVRes>)>,
         storage: db::Database,
-        connections: Arc<Mutex<S2SConnections>>,
+        clients: Arc<Mutex<MessageClients>>,
     ) -> Result<Self, ServerError> {
         let server = Server::builder()
             .with_tls((CERT_PEM, KEY_PEM))
@@ -53,7 +53,7 @@ impl S2SServer {
 
         log::debug!("Starting S2S Server on Port: {}", port);
 
-        let mdns = S2SMDNS::new(node_id, core_id, connections.clone(), local_ip, port);
+        let mdns = S2SMDNS::new(node_id, core_id, clients.clone(), local_ip, port);
 
         Ok(Self {
             storage,

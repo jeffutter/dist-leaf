@@ -5,17 +5,20 @@ mod s2s_server;
 
 use crate::{
     protocol::{KVReq, KVRes},
-    s2s_connection,
+    message_clients,
     vnode::{client_server::ClientServer, s2s_server::S2SServer},
     ServerError,
 };
+use async_trait::async_trait;
 use quic_client::DistKVClient;
-use quic_transport::{ChannelMessageClient, MessageClient};
+use quic_transport::{ChannelMessageClient, MessageClient, TransportError};
+use std::fmt::Debug;
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
 use tokio::{
     sync::{mpsc, oneshot, Mutex},
     try_join,
 };
+use tracing::instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -45,13 +48,14 @@ impl VNode {
     ) -> Result<Self, ServerError> {
         let vnode_id = VNodeId::new(node_id, core_id);
         let client = DistKVClient::new().unwrap();
-        let mut connections = s2s_connection::S2SConnections::new(client, vnode_id);
+        let storage = db::Database::new_tmp();
+        let mut connections =
+            message_clients::MessageClients::new(client, vnode_id, storage.clone());
         for (vnode_id, channel_message_client) in vnode_to_cmc {
             connections.add_channel(vnode_id, channel_message_client)
         }
         let connections = Arc::new(Mutex::new(connections));
 
-        let storage = db::Database::new_tmp();
         let s2s_server = S2SServer::new(
             node_id,
             core_id,
@@ -81,8 +85,43 @@ impl VNode {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum Destination<'a> {
-    Remote(&'a Box<dyn MessageClient<KVReq, KVRes>>),
-    Local,
+#[derive(Debug)]
+pub(crate) struct LocalMessageClient {
+    storage: db::Database,
+}
+
+impl LocalMessageClient {
+    pub(crate) fn new(storage: db::Database) -> Self {
+        Self { storage }
+    }
+}
+
+#[async_trait]
+impl MessageClient<KVReq, KVRes> for LocalMessageClient {
+    #[instrument(skip(self), fields(message_client = "Local"))]
+    async fn request(&mut self, req: KVReq) -> Result<KVRes, TransportError> {
+        match req {
+            KVReq::Get { key } => {
+                let res_data = self
+                    .storage
+                    .get(&key)
+                    .map_err(|e| TransportError::UnknownMsg(e.to_string()))?;
+                let res = KVRes::Result { result: res_data };
+                Ok(res)
+            }
+            KVReq::Put { key, value } => {
+                self.storage
+                    .put(&key, &value)
+                    .map_err(|e| TransportError::UnknownMsg(e.to_string()))?;
+                let res = KVRes::Ok;
+                Ok(res)
+            }
+        }
+    }
+
+    fn box_clone(&self) -> Box<dyn MessageClient<KVReq, KVRes>> {
+        Box::new(LocalMessageClient {
+            storage: self.storage.clone(),
+        })
+    }
 }

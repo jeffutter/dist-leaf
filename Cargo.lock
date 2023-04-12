@@ -1147,6 +1147,7 @@ dependencies = [
 name = "quic-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "capnp",
  "capnpc",

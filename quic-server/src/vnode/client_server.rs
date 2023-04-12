@@ -1,14 +1,14 @@
 use crate::{
-    protocol::{KVReq, KVRequest, KVRes, KVResponse},
-    s2s_connection::S2SConnections,
-    vnode::{client_mdns::ClientMDNS, Destination},
+    message_clients::MessageClients,
+    protocol::{KVRes, KVResponse},
+    vnode::client_mdns::ClientMDNS,
     ServerError,
 };
 use bytes::Bytes;
 use futures::StreamExt;
 use itertools::Itertools;
 use quic_client::protocol::{KVRequestType, KVResponseType};
-use quic_transport::{DataStream, Decode, Encode, MessageStream, RequestWithMetadata};
+use quic_transport::{DataStream, Decode, Encode, MessageStream};
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
 use std::{net::Ipv4Addr, sync::Arc, usize};
 use tokio::{
@@ -30,7 +30,7 @@ static CONSISTENCY_LEVEL: usize = match (REPLICATION_FACTOR / 2, REPLICATION_FAC
 };
 
 pub(crate) struct ClientServer {
-    connections: Arc<Mutex<S2SConnections>>,
+    clients: Arc<Mutex<MessageClients>>,
     storage: db::Database,
     server: s2n_quic::Server,
 }
@@ -41,7 +41,7 @@ impl ClientServer {
         core_id: Uuid,
         local_ip: Ipv4Addr,
         storage: db::Database,
-        connections: Arc<Mutex<S2SConnections>>,
+        clients: Arc<Mutex<MessageClients>>,
     ) -> Result<Self, ServerError> {
         let server = Server::builder()
             .with_tls((CERT_PEM, KEY_PEM))
@@ -61,87 +61,26 @@ impl ClientServer {
         let _mdns = ClientMDNS::new(node_id, core_id, local_ip, port);
 
         Ok(Self {
-            connections,
+            clients,
             storage,
             server,
         })
     }
 
-    #[instrument]
-    async fn handle_local(req: KVReq, storage: db::Database) -> Result<KVRes, ServerError> {
-        match req {
-            KVReq::Get { key } => {
-                let res_data = storage.get(&key)?;
-                let res = KVRes::Result { result: res_data };
-                Ok(res)
-            }
-            KVReq::Put { key, value } => {
-                storage.put(&key, &value)?;
-                let res = KVRes::Ok;
-                Ok(res)
-            }
-        }
-    }
-
-    #[instrument(skip(send_tx))]
-    async fn handle_local_req(
-        req: KVRequest,
-        storage: db::Database,
-        send_tx: mpsc::Sender<Bytes>,
-    ) -> Result<(), ServerError> {
-        let id = req.id().clone();
-        let res = Self::handle_local(req.into(), storage).await?;
-        let res = RequestWithMetadata::new(id, res);
-        let res: KVResponse = res.into();
-        let encoded = res.encode();
-        send_tx.send(encoded).await.expect("stream should be open");
-        Ok(())
-    }
-
-    #[instrument(skip(connections, send_tx))]
+    #[instrument(skip(clients, send_tx))]
     async fn handle_request(
         req: KVRequestType,
-        connections: Arc<Mutex<S2SConnections>>,
+        clients: Arc<Mutex<MessageClients>>,
         storage: db::Database,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
         let mut join_set: JoinSet<Result<KVResponseType, ServerError>> = JoinSet::new();
-        let mut cs = connections.lock().await;
+        let mut cs = clients.lock().await;
         let replicas = cs.replicas(req.key(), REPLICATION_FACTOR).await;
 
         event!(Level::DEBUG, "replicas" = ?replicas);
 
-        let local = replicas.iter().filter(|destination| match destination {
-            Destination::Local => true,
-            _ => false,
-        });
-
-        let remote = replicas
-            .iter()
-            .filter_map(|destination| match destination {
-                Destination::Remote(conn) => Some(conn.box_clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        if local.count() > 0 {
-            let req = req.clone();
-            let storage = storage.clone();
-            join_set.spawn({
-                async move {
-                    let id = req.id().clone();
-                    let res = Self::handle_local(req.into(), storage).await?;
-                    let res: KVResponseType = match res {
-                        KVRes::Error { error } => KVResponseType::Error { id, error },
-                        KVRes::Result { result } => KVResponseType::Result { id, result },
-                        KVRes::Ok => KVResponseType::Ok(id),
-                    };
-                    Ok::<KVResponseType, ServerError>(res)
-                }
-            });
-        }
-
-        for connection in remote {
+        for connection in replicas {
             let req = req.clone();
 
             join_set.spawn({
@@ -222,7 +161,7 @@ impl ClientServer {
 
     async fn handle_stream(
         stream: BidirectionalStream,
-        connections: Arc<Mutex<S2SConnections>>,
+        clients: Arc<Mutex<MessageClients>>,
         storage: db::Database,
     ) {
         let (receive_stream, mut send_stream) = stream.split();
@@ -242,23 +181,21 @@ impl ClientServer {
 
         while let Some(Ok((req, _data))) = request_stream.next().await {
             let storage = storage.clone();
-            let connections = connections.clone();
+            let clients = clients.clone();
             let send_tx = send_tx.clone();
-            tokio::spawn(
-                async move { Self::handle_request(req, connections, storage, send_tx).await },
-            );
+            tokio::spawn(async move { Self::handle_request(req, clients, storage, send_tx).await });
         }
     }
 
     async fn handle_connection(
         mut connection: connection::Connection,
-        connections: Arc<Mutex<S2SConnections>>,
+        clients: Arc<Mutex<MessageClients>>,
         storage: db::Database,
     ) {
         while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
             tokio::spawn(Self::handle_stream(
                 stream,
-                connections.clone(),
+                clients.clone(),
                 storage.clone(),
             ));
         }
@@ -270,7 +207,7 @@ impl ClientServer {
         while let Some(connection) = self.server.accept().await {
             tokio::spawn(Self::handle_connection(
                 connection,
-                self.connections.clone(),
+                self.clients.clone(),
                 storage.clone(),
             ));
         }

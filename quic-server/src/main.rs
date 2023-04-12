@@ -1,5 +1,5 @@
 mod protocol;
-mod s2s_connection;
+mod message_clients;
 mod vnode;
 
 use db::DatabaseError;

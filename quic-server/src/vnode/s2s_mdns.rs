@@ -8,20 +8,20 @@ use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 use tokio::{sync::Mutex, task, time};
 use uuid::Uuid;
 
-use crate::{s2s_connection::S2SConnections, ServerError, VNodeId};
+use crate::{message_clients::MessageClients, ServerError, VNodeId};
 
 #[derive(Clone)]
 pub struct S2SMDNS {
     receiver: Receiver<ServiceEvent>,
     local_socket_addr: SocketAddr,
-    connections: Arc<Mutex<S2SConnections>>,
+    clients: Arc<Mutex<MessageClients>>,
 }
 
 impl S2SMDNS {
     pub(crate) fn new(
         node_id: Uuid,
         core_id: Uuid,
-        connections: Arc<Mutex<S2SConnections>>,
+        clients: Arc<Mutex<MessageClients>>,
         local_ip: Ipv4Addr,
         port: u16,
     ) -> Self {
@@ -51,7 +51,7 @@ impl S2SMDNS {
         Self {
             receiver,
             local_socket_addr,
-            connections,
+            clients,
         }
     }
 
@@ -59,7 +59,7 @@ impl S2SMDNS {
         let mut interval = time::interval(Duration::from_secs(30));
         let receiver = self.receiver.clone();
         let local_socket_addr = self.local_socket_addr.clone();
-        let connections = self.connections.clone();
+        let clients = self.clients.clone();
 
         task::spawn(async move {
             loop {
@@ -96,7 +96,7 @@ impl S2SMDNS {
                             );
 
                             if socket_addr != local_socket_addr {
-                                connections
+                                clients
                                     .lock()
                                     .await
                                     .add_connection(vnode_id, socket_addr)

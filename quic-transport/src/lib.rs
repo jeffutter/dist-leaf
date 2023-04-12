@@ -22,6 +22,8 @@ pub enum TransportError {
     Connection(#[from] s2n_quic::connection::Error),
     #[error("stream error")]
     Stream(#[from] s2n_quic::stream::Error),
+    #[error("unknown server error: {}", .0)]
+    UnknownMsg(String),
     #[error("unknown server error")]
     Unknown,
 }
