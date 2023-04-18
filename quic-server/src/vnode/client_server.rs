@@ -85,12 +85,12 @@ impl ClientServer {
 
             join_set.spawn({
                 async move {
-                    let id = req.id().clone();
+                    let request_id = req.request_id().clone();
                     let res = connection.box_clone().request(req.into()).await?;
                     let res: KVResponseType = match res {
-                        KVRes::Error { error } => KVResponseType::Error { id, error },
-                        KVRes::Result { result } => KVResponseType::Result { id, result },
-                        KVRes::Ok => KVResponseType::Ok(id),
+                        KVRes::Error { error } => KVResponseType::Error { request_id, error },
+                        KVRes::Result { result } => KVResponseType::Result { request_id, result },
+                        KVRes::Ok => KVResponseType::Ok(request_id),
                     };
 
                     Ok::<KVResponseType, ServerError>(res)
@@ -137,7 +137,7 @@ impl ClientServer {
                     break;
                 } else if results.len() == REPLICATION_FACTOR {
                     let res = KVResponse::Error {
-                        id: *req.id(),
+                        request_id: *req.request_id(),
                         error: "Results did not match".to_string(),
                     };
                     send_tx

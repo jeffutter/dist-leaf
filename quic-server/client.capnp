@@ -1,7 +1,7 @@
 @0xdca578873284febb;
 
 struct Request {
-  id @0 :UInt64;
+  requestId @0 :UInt64;
 
   union {
     get :group {
@@ -15,7 +15,7 @@ struct Request {
 }
 
 struct Response {
-  id @0 :UInt64;
+  requestId @0 :UInt64;
 
   union {
     result :group {

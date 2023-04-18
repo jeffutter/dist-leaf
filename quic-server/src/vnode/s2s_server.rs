@@ -85,9 +85,9 @@ impl S2SServer {
         storage: db::Database,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
-        let id = req.id().clone();
+        let request_id = req.request_id().clone();
         let res = Self::handle_local(req.into(), storage).await?;
-        let res = RequestWithMetadata::new(id, res);
+        let res = RequestWithMetadata::new(request_id, res);
         let res: KVResponse = res.into();
         let encoded = res.encode();
         send_tx.send(encoded).await.expect("stream should be open");

@@ -118,7 +118,7 @@ pub trait Decode {
     fn decode(bytes: &[u8]) -> Result<Self, TransportError>
     where
         Self: Sized;
-    fn id(&self) -> &u64;
+    fn request_id(&self) -> &u64;
 }
 
 pub trait Encode {
@@ -304,12 +304,15 @@ impl<Req, Res> Debug for ChannelMessageClient<Req, Res> {
 }
 
 pub struct RequestWithMetadata<Req> {
-    pub id: u64,
+    pub request_id: u64,
     pub request: Req,
 }
 
 impl<Req> RequestWithMetadata<Req> {
-    pub fn new(id: u64, request: Req) -> Self {
-        Self { id, request }
+    pub fn new(request_id: u64, request: Req) -> Self {
+        Self {
+            request_id,
+            request,
+        }
     }
 }
