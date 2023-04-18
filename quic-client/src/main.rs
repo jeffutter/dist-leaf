@@ -2,7 +2,7 @@ mod mdns;
 mod protocol;
 
 use env_logger::Env;
-use protocol::{KVRequest, KVRequestType, KVResponse, KVResponseType};
+use protocol::{ClientCommand, ClientRequest, ClientCommandResponse, ClientResponse};
 use quic_client::DistKVClient;
 use quic_transport::MessageClient;
 use std::{error::Error, thread};
@@ -26,14 +26,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = server_cons.iter().next().unwrap();
     println!("Client Found: {:?}", addr);
 
-    let client: DistKVClient<KVRequest, KVRequestType, KVResponse, KVResponseType> =
+    let client: DistKVClient<ClientCommand, ClientRequest, ClientCommandResponse, ClientResponse> =
         DistKVClient::new()?;
     let connection = client.connect(*addr).await?;
     let mut stream = connection.stream().await?;
 
     println!("Client Ready");
 
-    let (tx, mut rx) = channel::<KVRequest>(1);
+    let (tx, mut rx) = channel::<ClientCommand>(1);
 
     let cli = thread::spawn(move || {
         std::io::stdin()
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         loop {
             if let Some(req) = rx.recv().await {
-                let response: KVResponse = stream.request(req).await.unwrap().into();
+                let response: ClientCommandResponse = stream.request(req).await.unwrap().into();
                 println!("Response: {:?}", response);
             }
         }
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn handle_input_line(line: String) -> Option<KVRequest> {
+fn handle_input_line(line: String) -> Option<ClientCommand> {
     let mut args = line.split(' ');
 
     let next = args.next().map(|x| x.to_uppercase());
@@ -78,7 +78,7 @@ fn handle_input_line(line: String) -> Option<KVRequest> {
                     }
                 }
             };
-            Some(KVRequest::Get {
+            Some(ClientCommand::Get {
                 key: key.to_string(),
             })
         }
@@ -102,7 +102,7 @@ fn handle_input_line(line: String) -> Option<KVRequest> {
                 }
             };
 
-            Some(KVRequest::Put {
+            Some(ClientCommand::Put {
                 key: key.to_string(),
                 value: value.to_string(),
             })

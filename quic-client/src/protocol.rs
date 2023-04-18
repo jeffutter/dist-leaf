@@ -7,7 +7,7 @@ use tracing::instrument;
 use crate::client_capnp;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KVRequestType {
+pub enum ClientRequest {
     Get {
         request_id: u64,
         key: String,
@@ -19,16 +19,16 @@ pub enum KVRequestType {
     },
 }
 
-impl KVRequestType {
+impl ClientRequest {
     pub fn key(&self) -> &String {
         match self {
-            KVRequestType::Get { key, .. } => key,
-            KVRequestType::Put { key, .. } => key,
+            ClientRequest::Get { key, .. } => key,
+            ClientRequest::Put { key, .. } => key,
         }
     }
 }
 
-impl Encode for KVRequestType {
+impl Encode for ClientRequest {
     #[instrument]
     fn encode(&self) -> Bytes {
         let mut message = ::capnp::message::Builder::new_default();
@@ -36,12 +36,12 @@ impl Encode for KVRequestType {
         let mut res = message.init_root::<client_capnp::request::Builder>();
 
         match self {
-            KVRequestType::Get { request_id, key } => {
+            ClientRequest::Get { request_id, key } => {
                 res.set_request_id(*request_id);
                 let mut get = res.init_get();
                 get.set_key(&key);
             }
-            KVRequestType::Put {
+            ClientRequest::Put {
                 request_id,
                 key,
                 value,
@@ -64,7 +64,7 @@ impl Encode for KVRequestType {
     }
 }
 
-impl Decode for KVRequestType {
+impl Decode for ClientRequest {
     #[instrument(skip(buf))]
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
@@ -83,7 +83,7 @@ impl Decode for KVRequestType {
                     .map_err(|_e| TransportError::Unknown)?
                     .to_string();
 
-                Ok(KVRequestType::Get { request_id, key })
+                Ok(ClientRequest::Get { request_id, key })
             }
             client_capnp::request::Which::Put(put_request) => {
                 let key = put_request
@@ -96,7 +96,7 @@ impl Decode for KVRequestType {
                     .map_err(|_e| TransportError::Unknown)?
                     .to_string();
 
-                Ok(KVRequestType::Put {
+                Ok(ClientRequest::Put {
                     request_id,
                     key,
                     value,
@@ -107,14 +107,14 @@ impl Decode for KVRequestType {
 
     fn request_id(&self) -> &u64 {
         match self {
-            KVRequestType::Get { request_id, .. } => request_id,
-            KVRequestType::Put { request_id, .. } => request_id,
+            ClientRequest::Get { request_id, .. } => request_id,
+            ClientRequest::Put { request_id, .. } => request_id,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum KVResponseType {
+pub enum ClientResponse {
     Error {
         request_id: u64,
         error: String,
@@ -126,7 +126,7 @@ pub enum KVResponseType {
     Ok(u64),
 }
 
-impl Encode for KVResponseType {
+impl Encode for ClientResponse {
     #[instrument]
     fn encode(&self) -> Bytes {
         let mut message = ::capnp::message::Builder::new_default();
@@ -134,25 +134,25 @@ impl Encode for KVResponseType {
         let mut res = message.init_root::<client_capnp::response::Builder>();
 
         match self {
-            KVResponseType::Error { request_id, error } => {
+            ClientResponse::Error { request_id, error } => {
                 res.set_request_id(*request_id);
                 res.init_error().set_message(&error);
             }
-            KVResponseType::Result {
+            ClientResponse::Result {
                 request_id,
                 result: Some(x),
             } => {
                 res.set_request_id(*request_id);
                 res.init_result().set_value(&x);
             }
-            KVResponseType::Result {
+            ClientResponse::Result {
                 request_id,
                 result: None,
             } => {
                 res.set_request_id(*request_id);
                 res.init_result();
             }
-            KVResponseType::Ok(request_id) => {
+            ClientResponse::Ok(request_id) => {
                 res.set_request_id(*request_id);
                 res.init_ok();
             }
@@ -169,7 +169,7 @@ impl Encode for KVResponseType {
     }
 }
 
-impl Decode for KVResponseType {
+impl Decode for ClientResponse {
     #[instrument(skip(buf))]
     fn decode(buf: &[u8]) -> Result<Self, TransportError> {
         let message_reader =
@@ -189,74 +189,74 @@ impl Decode for KVResponseType {
                     .to_string();
 
                 // Null Result?
-                Ok(KVResponseType::Result {
+                Ok(ClientResponse::Result {
                     request_id,
                     result: Some(value),
                 })
             }
-            client_capnp::response::Which::Ok(_) => Ok(KVResponseType::Ok(request_id)),
+            client_capnp::response::Which::Ok(_) => Ok(ClientResponse::Ok(request_id)),
             client_capnp::response::Which::Error(result) => {
                 let error = result
                     .get_message()
                     .map_err(|_e| TransportError::Unknown)?
                     .to_string();
-                Ok(KVResponseType::Error { request_id, error })
+                Ok(ClientResponse::Error { request_id, error })
             }
         }
     }
 
     fn request_id(&self) -> &u64 {
         match self {
-            KVResponseType::Error { request_id, .. } => request_id,
-            KVResponseType::Result { request_id, .. } => request_id,
-            KVResponseType::Ok(request_id) => request_id,
+            ClientResponse::Error { request_id, .. } => request_id,
+            ClientResponse::Result { request_id, .. } => request_id,
+            ClientResponse::Ok(request_id) => request_id,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KVRequest {
+pub enum ClientCommand {
     Get { key: String },
     Put { key: String, value: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KVResponse {
+pub enum ClientCommandResponse {
     Error { error: String },
     Result { result: Option<String> },
     Ok,
 }
 
-impl From<RequestWithMetadata<KVRequestType>> for KVRequestType {
-    fn from(req_with_id: RequestWithMetadata<KVRequestType>) -> Self {
+impl From<RequestWithMetadata<ClientRequest>> for ClientRequest {
+    fn from(req_with_id: RequestWithMetadata<ClientRequest>) -> Self {
         req_with_id.request
     }
 }
 
-impl From<RequestWithMetadata<KVResponseType>> for KVResponseType {
-    fn from(res_with_id: RequestWithMetadata<KVResponseType>) -> Self {
+impl From<RequestWithMetadata<ClientResponse>> for ClientResponse {
+    fn from(res_with_id: RequestWithMetadata<ClientResponse>) -> Self {
         res_with_id.request
     }
 }
 
-impl From<KVResponseType> for KVResponse {
-    fn from(response: KVResponseType) -> Self {
+impl From<ClientResponse> for ClientCommandResponse {
+    fn from(response: ClientResponse) -> Self {
         match response {
-            KVResponseType::Error { error, .. } => KVResponse::Error { error },
-            KVResponseType::Result { result, .. } => KVResponse::Result { result },
-            KVResponseType::Ok(_) => KVResponse::Ok,
+            ClientResponse::Error { error, .. } => ClientCommandResponse::Error { error },
+            ClientResponse::Result { result, .. } => ClientCommandResponse::Result { result },
+            ClientResponse::Ok(_) => ClientCommandResponse::Ok,
         }
     }
 }
 
-impl From<RequestWithMetadata<KVRequest>> for KVRequestType {
-    fn from(req_with_id: RequestWithMetadata<KVRequest>) -> Self {
+impl From<RequestWithMetadata<ClientCommand>> for ClientRequest {
+    fn from(req_with_id: RequestWithMetadata<ClientCommand>) -> Self {
         match req_with_id.request {
-            KVRequest::Get { key } => KVRequestType::Get {
+            ClientCommand::Get { key } => ClientRequest::Get {
                 request_id: req_with_id.request_id,
                 key,
             },
-            KVRequest::Put { key, value } => KVRequestType::Put {
+            ClientCommand::Put { key, value } => ClientRequest::Put {
                 request_id: req_with_id.request_id,
                 key,
                 value,
@@ -265,18 +265,18 @@ impl From<RequestWithMetadata<KVRequest>> for KVRequestType {
     }
 }
 
-impl From<RequestWithMetadata<KVResponse>> for KVResponseType {
-    fn from(res_with_id: RequestWithMetadata<KVResponse>) -> Self {
+impl From<RequestWithMetadata<ClientCommandResponse>> for ClientResponse {
+    fn from(res_with_id: RequestWithMetadata<ClientCommandResponse>) -> Self {
         match res_with_id.request {
-            KVResponse::Error { error } => KVResponseType::Error {
+            ClientCommandResponse::Error { error } => ClientResponse::Error {
                 request_id: res_with_id.request_id,
                 error,
             },
-            KVResponse::Result { result } => KVResponseType::Result {
+            ClientCommandResponse::Result { result } => ClientResponse::Result {
                 request_id: res_with_id.request_id,
                 result,
             },
-            KVResponse::Ok => KVResponseType::Ok(res_with_id.request_id),
+            ClientCommandResponse::Ok => ClientResponse::Ok(res_with_id.request_id),
         }
     }
 }

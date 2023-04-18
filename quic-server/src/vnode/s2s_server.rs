@@ -1,6 +1,6 @@
 use crate::{
     message_clients::MessageClients,
-    protocol::{KVReq, KVRequest, KVRes, KVResponse},
+    protocol::{ServerCommand, ServerRequest, ServerCommandResponse, ServerResponse},
     ServerError,
 };
 use bytes::Bytes;
@@ -26,7 +26,7 @@ pub(crate) struct S2SServer {
     storage: db::Database,
     pub(crate) mdns: S2SMDNS,
     server: s2n_quic::Server,
-    rx: mpsc::Receiver<(KVReq, oneshot::Sender<KVRes>)>,
+    rx: mpsc::Receiver<(ServerCommand, oneshot::Sender<ServerCommandResponse>)>,
 }
 
 impl S2SServer {
@@ -34,7 +34,7 @@ impl S2SServer {
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        rx: mpsc::Receiver<(KVReq, oneshot::Sender<KVRes>)>,
+        rx: mpsc::Receiver<(ServerCommand, oneshot::Sender<ServerCommandResponse>)>,
         storage: db::Database,
         clients: Arc<Mutex<MessageClients>>,
     ) -> Result<Self, ServerError> {
@@ -64,16 +64,16 @@ impl S2SServer {
     }
 
     #[instrument]
-    async fn handle_local(req: KVReq, storage: db::Database) -> Result<KVRes, ServerError> {
+    async fn handle_local(req: ServerCommand, storage: db::Database) -> Result<ServerCommandResponse, ServerError> {
         match req {
-            KVReq::Get { key } => {
+            ServerCommand::Get { key } => {
                 let res_data = storage.get(&key)?;
-                let res = KVRes::Result { result: res_data };
+                let res = ServerCommandResponse::Result { result: res_data };
                 Ok(res)
             }
-            KVReq::Put { key, value } => {
+            ServerCommand::Put { key, value } => {
                 storage.put(&key, &value)?;
-                let res = KVRes::Ok;
+                let res = ServerCommandResponse::Ok;
                 Ok(res)
             }
         }
@@ -81,14 +81,14 @@ impl S2SServer {
 
     #[instrument(skip(send_tx))]
     async fn handle_local_req(
-        req: KVRequest,
+        req: ServerRequest,
         storage: db::Database,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
         let request_id = req.request_id().clone();
         let res = Self::handle_local(req.into(), storage).await?;
         let res = RequestWithMetadata::new(request_id, res);
-        let res: KVResponse = res.into();
+        let res: ServerResponse = res.into();
         let encoded = res.encode();
         send_tx.send(encoded).await.expect("stream should be open");
         Ok(())
@@ -97,7 +97,7 @@ impl S2SServer {
     async fn handle_stream(stream: BidirectionalStream, storage: db::Database) {
         let (receive_stream, mut send_stream) = stream.split();
         let data_stream = DataStream::new(receive_stream);
-        let mut request_stream: MessageStream<KVRequest> = MessageStream::new(data_stream);
+        let mut request_stream: MessageStream<ServerRequest> = MessageStream::new(data_stream);
 
         let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
             mpsc::channel(100);

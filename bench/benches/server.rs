@@ -6,10 +6,10 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use env_logger::Env;
 use futures::Future;
 use itertools::Itertools;
-use quic_client::protocol::{KVRequest, KVResponse};
+use quic_client::protocol::{ClientCommand, ClientCommandResponse};
 use quic_client::ClientError;
 use quic_client::{
-    protocol::{KVRequestType, KVResponseType},
+    protocol::{ClientRequest, ClientResponse},
     DistKVClient,
 };
 use quic_transport::{MessageClient, QuicMessageClient};
@@ -19,7 +19,7 @@ async fn put(
     kvs: &Vec<(&String, &String)>,
     stream: impl Future<
         Output = Result<
-            QuicMessageClient<KVRequest, KVRequestType, KVResponse, KVResponseType>,
+            QuicMessageClient<ClientCommand, ClientRequest, ClientCommandResponse, ClientResponse>,
             ClientError,
         >,
     >,
@@ -27,7 +27,7 @@ async fn put(
     let mut stream = stream.await.unwrap();
     for (key, value) in kvs {
         log::debug!("Putting: {} - {}", key, value);
-        let request = KVRequest::Put {
+        let request = ClientCommand::Put {
             key: key.to_string(),
             value: value.to_string(),
         };
@@ -40,7 +40,7 @@ async fn get(
     kvs: &Vec<(&String, &String)>,
     stream: impl Future<
         Output = Result<
-            QuicMessageClient<KVRequest, KVRequestType, KVResponse, KVResponseType>,
+            QuicMessageClient<ClientCommand, ClientRequest, ClientCommandResponse, ClientResponse>,
             ClientError,
         >,
     >,
@@ -48,7 +48,7 @@ async fn get(
     let mut stream = stream.await.unwrap();
     for (key, _value) in kvs {
         log::debug!("Getting: {}", key);
-        let request = KVRequest::Get {
+        let request = ClientCommand::Get {
             key: key.to_string(),
         };
         stream.request(request).await.unwrap();

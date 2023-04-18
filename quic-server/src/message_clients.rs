@@ -1,5 +1,5 @@
 use crate::{
-    protocol::{KVReq, KVRequest, KVRes, KVResponse},
+    protocol::{ServerCommand, ServerRequest, ServerCommandResponse, ServerResponse},
     vnode::LocalMessageClient,
     ServerError, VNodeId,
 };
@@ -9,21 +9,21 @@ use quic_transport::{ChannelMessageClient, MessageClient};
 use std::{collections::HashMap, net::SocketAddr};
 
 pub(crate) struct MessageClients {
-    clients: HashMap<VNodeId, Box<dyn MessageClient<KVReq, KVRes>>>,
+    clients: HashMap<VNodeId, Box<dyn MessageClient<ServerCommand, ServerCommandResponse>>>,
     ring: Ring<VNodeId>,
-    client: DistKVClient<KVReq, KVRequest, KVRes, KVResponse>,
+    client: DistKVClient<ServerCommand, ServerRequest, ServerCommandResponse, ServerResponse>,
 }
 
 impl MessageClients {
     pub(crate) fn new(
-        client: DistKVClient<KVReq, KVRequest, KVRes, KVResponse>,
+        client: DistKVClient<ServerCommand, ServerRequest, ServerCommandResponse, ServerResponse>,
         vnode_id: VNodeId,
         storage: db::Database,
     ) -> Self {
         let mut ring = RingBuilder::default().build();
         ring.insert(vnode_id.clone());
 
-        let mut clients: HashMap<VNodeId, Box<dyn MessageClient<KVReq, KVRes>>> = HashMap::new();
+        let mut clients: HashMap<VNodeId, Box<dyn MessageClient<ServerCommand, ServerCommandResponse>>> = HashMap::new();
         let local = Box::new(LocalMessageClient::new(storage));
         clients.insert(vnode_id.clone(), local);
 
@@ -52,7 +52,7 @@ impl MessageClients {
     pub(crate) fn add_channel(
         &mut self,
         vnode_id: VNodeId,
-        channel_client: ChannelMessageClient<KVReq, KVRes>,
+        channel_client: ChannelMessageClient<ServerCommand, ServerCommandResponse>,
     ) {
         if let None = self.clients.get(&vnode_id) {
             self.clients
@@ -61,7 +61,7 @@ impl MessageClients {
         }
     }
 
-    pub(crate) fn get(&mut self, key: &str) -> Box<dyn MessageClient<KVReq, KVRes>> {
+    pub(crate) fn get(&mut self, key: &str) -> Box<dyn MessageClient<ServerCommand, ServerCommandResponse>> {
         let vnode_id = self.ring.get(key);
         self.clients.get(vnode_id).unwrap().box_clone()
     }
@@ -70,7 +70,7 @@ impl MessageClients {
         &mut self,
         key: &str,
         n: usize,
-    ) -> Vec<Box<dyn MessageClient<KVReq, KVRes>>> {
+    ) -> Vec<Box<dyn MessageClient<ServerCommand, ServerCommandResponse>>> {
         self.ring
             .replicas(key)
             .take(n)

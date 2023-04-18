@@ -1,13 +1,13 @@
 use crate::{
     message_clients::MessageClients,
-    protocol::{KVRes, KVResponse},
+    protocol::{ServerCommandResponse, ServerResponse},
     vnode::client_mdns::ClientMDNS,
     ServerError,
 };
 use bytes::Bytes;
 use futures::StreamExt;
 use itertools::Itertools;
-use quic_client::protocol::{KVRequestType, KVResponseType};
+use quic_client::protocol::{ClientRequest, ClientResponse};
 use quic_transport::{DataStream, Decode, Encode, MessageStream};
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
 use std::{net::Ipv4Addr, sync::Arc, usize};
@@ -69,12 +69,12 @@ impl ClientServer {
 
     #[instrument(skip(clients, send_tx))]
     async fn handle_request(
-        req: KVRequestType,
+        req: ClientRequest,
         clients: Arc<Mutex<MessageClients>>,
         storage: db::Database,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
-        let mut join_set: JoinSet<Result<KVResponseType, ServerError>> = JoinSet::new();
+        let mut join_set: JoinSet<Result<ClientResponse, ServerError>> = JoinSet::new();
         let mut cs = clients.lock().await;
         let replicas = cs.replicas(req.key(), REPLICATION_FACTOR).await;
 
@@ -87,18 +87,18 @@ impl ClientServer {
                 async move {
                     let request_id = req.request_id().clone();
                     let res = connection.box_clone().request(req.into()).await?;
-                    let res: KVResponseType = match res {
-                        KVRes::Error { error } => KVResponseType::Error { request_id, error },
-                        KVRes::Result { result } => KVResponseType::Result { request_id, result },
-                        KVRes::Ok => KVResponseType::Ok(request_id),
+                    let res: ClientResponse = match res {
+                        ServerCommandResponse::Error { error } => ClientResponse::Error { request_id, error },
+                        ServerCommandResponse::Result { result } => ClientResponse::Result { request_id, result },
+                        ServerCommandResponse::Ok => ClientResponse::Ok(request_id),
                     };
 
-                    Ok::<KVResponseType, ServerError>(res)
+                    Ok::<ClientResponse, ServerError>(res)
                 }
             });
         }
 
-        let mut results: Mutex<Vec<Option<Result<KVResponseType, ServerError>>>> =
+        let mut results: Mutex<Vec<Option<Result<ClientResponse, ServerError>>>> =
             Mutex::new(Vec::new());
 
         while let Some(res) = join_set.join_next().await {
@@ -111,7 +111,7 @@ impl ClientServer {
             }
 
             if results.len() >= CONSISTENCY_LEVEL {
-                let unique_res: Vec<KVResponseType> = results
+                let unique_res: Vec<ClientResponse> = results
                     .iter()
                     .filter_map(|x| match x {
                         Some(Ok(res)) => Some(res.clone()),
@@ -136,7 +136,7 @@ impl ClientServer {
 
                     break;
                 } else if results.len() == REPLICATION_FACTOR {
-                    let res = KVResponse::Error {
+                    let res = ServerResponse::Error {
                         request_id: *req.request_id(),
                         error: "Results did not match".to_string(),
                     };
@@ -152,7 +152,7 @@ impl ClientServer {
 
         // For put requests, we want to let all of the writes finish, even if we've hit the
         // requested Consistency Level
-        if let KVRequestType::Put { .. } = req {
+        if let ClientRequest::Put { .. } = req {
             join_set.detach_all();
         }
 
@@ -166,7 +166,7 @@ impl ClientServer {
     ) {
         let (receive_stream, mut send_stream) = stream.split();
         let data_stream = DataStream::new(receive_stream);
-        let mut request_stream: MessageStream<KVRequestType> = MessageStream::new(data_stream);
+        let mut request_stream: MessageStream<ClientRequest> = MessageStream::new(data_stream);
 
         let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
             mpsc::channel(100);

@@ -4,7 +4,7 @@ pub(crate) mod s2s_mdns;
 mod s2s_server;
 
 use crate::{
-    protocol::{KVReq, KVRes},
+    protocol::{ServerCommand, ServerCommandResponse},
     message_clients,
     vnode::{client_server::ClientServer, s2s_server::S2SServer},
     ServerError,
@@ -43,8 +43,8 @@ impl VNode {
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        rx: mpsc::Receiver<(KVReq, oneshot::Sender<KVRes>)>,
-        vnode_to_cmc: HashMap<VNodeId, ChannelMessageClient<KVReq, KVRes>>,
+        rx: mpsc::Receiver<(ServerCommand, oneshot::Sender<ServerCommandResponse>)>,
+        vnode_to_cmc: HashMap<VNodeId, ChannelMessageClient<ServerCommand, ServerCommandResponse>>,
     ) -> Result<Self, ServerError> {
         let vnode_id = VNodeId::new(node_id, core_id);
         let client = DistKVClient::new().unwrap();
@@ -97,29 +97,29 @@ impl LocalMessageClient {
 }
 
 #[async_trait]
-impl MessageClient<KVReq, KVRes> for LocalMessageClient {
+impl MessageClient<ServerCommand, ServerCommandResponse> for LocalMessageClient {
     #[instrument(skip(self), fields(message_client = "Local"))]
-    async fn request(&mut self, req: KVReq) -> Result<KVRes, TransportError> {
+    async fn request(&mut self, req: ServerCommand) -> Result<ServerCommandResponse, TransportError> {
         match req {
-            KVReq::Get { key } => {
+            ServerCommand::Get { key } => {
                 let res_data = self
                     .storage
                     .get(&key)
                     .map_err(|e| TransportError::UnknownMsg(e.to_string()))?;
-                let res = KVRes::Result { result: res_data };
+                let res = ServerCommandResponse::Result { result: res_data };
                 Ok(res)
             }
-            KVReq::Put { key, value } => {
+            ServerCommand::Put { key, value } => {
                 self.storage
                     .put(&key, &value)
                     .map_err(|e| TransportError::UnknownMsg(e.to_string()))?;
-                let res = KVRes::Ok;
+                let res = ServerCommandResponse::Ok;
                 Ok(res)
             }
         }
     }
 
-    fn box_clone(&self) -> Box<dyn MessageClient<KVReq, KVRes>> {
+    fn box_clone(&self) -> Box<dyn MessageClient<ServerCommand, ServerCommandResponse>> {
         Box::new(LocalMessageClient {
             storage: self.storage.clone(),
         })
