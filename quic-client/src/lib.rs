@@ -1,6 +1,6 @@
 pub mod protocol;
 
-use quic_transport::{Decode, Encode, QuicMessageClient, RequestWithMetadata, TransportError};
+use quic_transport::{Decode, Encode, QuicMessageClient, TransportError};
 use s2n_quic::connection::Handle;
 use s2n_quic::{client::Connect, Client, Connection};
 use std::fmt::Debug;
@@ -26,18 +26,16 @@ pub enum ClientError {
     Unknown,
 }
 
-pub struct DistKVClient<Req, ReqT, Res, ResT> {
+pub struct DistKVClient<Req, Res> {
     client: Client,
     req: PhantomData<Req>,
     res: PhantomData<Res>,
-    reqt: PhantomData<ReqT>,
-    rest: PhantomData<ResT>,
 }
 
-impl<Req, ReqT, Res, ResT> DistKVClient<Req, ReqT, Res, ResT>
+impl<Req, Res> DistKVClient<Req, Res>
 where
-    ReqT: Encode + Decode + Debug + From<RequestWithMetadata<Req>> + Send,
-    ResT: Encode + Decode + Debug + Sync + Send + 'static,
+    Req: Encode + Decode + Debug + Send,
+    Res: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub fn new() -> Result<Self, ClientError> {
         let client = Client::builder()
@@ -52,15 +50,13 @@ where
             client,
             req: PhantomData,
             res: PhantomData,
-            reqt: PhantomData,
-            rest: PhantomData,
         })
     }
 
     pub async fn connect(
         &self,
         addr: SocketAddr,
-    ) -> Result<DistKVConnection<Req, ReqT, Res, ResT>, ClientError> {
+    ) -> Result<DistKVConnection<Req, Res>, ClientError> {
         let connect = Connect::new(addr).with_server_name("localhost");
         let mut connection = self.client.connect(connect).await?;
         // ensure the connection doesn't time out with inactivity
@@ -72,31 +68,27 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct DistKVConnection<Req, ReqT, Res, ResT> {
+#[derive(Clone)]
+pub struct DistKVConnection<Req, Res> {
     connection: Handle,
     req: PhantomData<Req>,
     res: PhantomData<Res>,
-    reqt: PhantomData<ReqT>,
-    rest: PhantomData<ResT>,
 }
 
-impl<Req, ReqT, Res, ResT> DistKVConnection<Req, ReqT, Res, ResT>
+impl<Req, Res> DistKVConnection<Req, Res>
 where
-    ReqT: Encode + Decode + Debug + From<RequestWithMetadata<Req>> + Send,
-    ResT: Encode + Decode + Debug + Sync + Send + 'static,
+    Req: Encode + Decode + Debug + Send,
+    Res: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Connection) -> Self {
         Self {
             connection: connection.handle(),
             req: PhantomData,
             res: PhantomData,
-            reqt: PhantomData,
-            rest: PhantomData,
         }
     }
 
-    pub async fn stream(&self) -> Result<QuicMessageClient<Req, ReqT, Res, ResT>, ClientError> {
+    pub async fn stream(&self) -> Result<QuicMessageClient<Req, Res>, ClientError> {
         QuicMessageClient::new(self.connection.clone())
             .await
             .map_err(|e| e.into())

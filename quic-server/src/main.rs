@@ -1,5 +1,5 @@
-mod protocol;
 mod message_clients;
+mod protocol;
 mod vnode;
 
 use db::DatabaseError;
@@ -14,7 +14,7 @@ use tokio::{
 use uuid::Uuid;
 use vnode::VNodeId;
 
-use crate::protocol::{ServerCommand, ServerCommandResponse};
+use crate::protocol::{ServerRequest, ServerResponse};
 use crate::vnode::VNode;
 
 pub mod server_capnp {
@@ -54,15 +54,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (mut core_to_vnode_id, mut core_to_rx, core_to_cmc): (
         HashMap<usize, VNodeId>,
-        HashMap<usize, mpsc::Receiver<(ServerCommand, oneshot::Sender<ServerCommandResponse>)>>,
-        HashMap<VNodeId, ChannelMessageClient<ServerCommand, ServerCommandResponse>>,
+        HashMap<usize, mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>>,
+        HashMap<VNodeId, ChannelMessageClient<ServerRequest, ServerResponse>>,
     ) = core_ids.iter().fold(
         (HashMap::new(), HashMap::new(), HashMap::new()),
         |(mut core_to_vnode_id, mut rx_acc, mut tx_acc), id| {
             let id = id.id;
             let core_id = Uuid::new_v4();
             let vnode_id = VNodeId::new(node_id, core_id);
-            let (tx, rx) = mpsc::channel::<(ServerCommand, oneshot::Sender<ServerCommandResponse>)>(1);
+            let (tx, rx) = mpsc::channel::<(ServerRequest, oneshot::Sender<ServerResponse>)>(1);
             let channel_message_client = ChannelMessageClient::new(tx);
             core_to_vnode_id.insert(id, vnode_id.clone());
             rx_acc.insert(id, rx);

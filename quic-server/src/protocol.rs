@@ -1,7 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
-use quic_client::protocol::ClientRequest;
-use quic_transport::{Decode, Encode, RequestWithMetadata, TransportError};
+use quic_transport::{Decode, Encode, TransportError};
 use std::io::Write;
 use thiserror::Error;
 use tokio::io;
@@ -21,11 +20,11 @@ pub enum KVServerError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerRequest {
     Get {
-        request_id: u64,
+        request_id: uhlc::Timestamp,
         key: String,
     },
     Put {
-        request_id: u64,
+        request_id: uhlc::Timestamp,
         key: String,
         value: String,
     },
@@ -36,6 +35,13 @@ impl ServerRequest {
         match self {
             ServerRequest::Get { key, .. } => key,
             ServerRequest::Put { key, .. } => key,
+        }
+    }
+
+    pub fn request_id(&self) -> &uhlc::Timestamp {
+        match self {
+            ServerRequest::Get { request_id, .. } => request_id,
+            ServerRequest::Put { request_id, .. } => request_id,
         }
     }
 }
@@ -49,7 +55,7 @@ impl Encode for ServerRequest {
 
         match self {
             ServerRequest::Get { request_id, key } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 let mut get = res.init_get();
                 get.set_key(&key);
             }
@@ -58,7 +64,7 @@ impl Encode for ServerRequest {
                 key,
                 value,
             } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 let mut put = res.init_put();
                 put.set_key(&key);
                 put.set_value(&value);
@@ -86,7 +92,11 @@ impl Decode for ServerRequest {
             .get_root::<server_capnp::request::Reader>()
             .unwrap();
 
-        let request_id = request.get_request_id();
+        let request_id = request
+            .get_request_id()
+            .map_err(|_e| TransportError::Unknown)?
+            .parse()
+            .map_err(|_e| TransportError::Unknown)?;
 
         match request.which().map_err(|_e| TransportError::Unknown)? {
             server_capnp::request::Which::Get(get_request) => {
@@ -116,26 +126,22 @@ impl Decode for ServerRequest {
             }
         }
     }
-
-    fn request_id(&self) -> &u64 {
-        match self {
-            ServerRequest::Get { request_id, .. } => request_id,
-            ServerRequest::Put { request_id, .. } => request_id,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ServerResponse {
     Error {
-        request_id: u64,
+        request_id: uhlc::Timestamp,
         error: String,
     },
     Result {
-        request_id: u64,
+        request_id: uhlc::Timestamp,
+        data_id: Option<uhlc::Timestamp>,
         result: Option<String>,
     },
-    Ok(u64),
+    Ok {
+        request_id: uhlc::Timestamp,
+    },
 }
 
 impl Encode for ServerResponse {
@@ -147,25 +153,39 @@ impl Encode for ServerResponse {
 
         match self {
             ServerResponse::Error { request_id, error } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 res.init_error().set_message(&error);
             }
             ServerResponse::Result {
                 request_id,
-                result: Some(x),
+                data_id: Some(data_id),
+                result: Some(data),
             } => {
-                res.set_request_id(*request_id);
-                res.init_result().set_value(&x);
+                res.set_request_id(&request_id.to_string());
+                let mut result = res.init_result();
+                result.set_value(&data);
+                result.set_data_id(&data_id.to_string());
             }
             ServerResponse::Result {
                 request_id,
+                data_id: None,
                 result: None,
             } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 res.init_result();
             }
-            ServerResponse::Ok(request_id) => {
-                res.set_request_id(*request_id);
+            ServerResponse::Result {
+                data_id: Some(_),
+                result: None,
+                ..
+            } => unreachable!(),
+            ServerResponse::Result {
+                data_id: None,
+                result: Some(_),
+                ..
+            } => unreachable!(),
+            ServerResponse::Ok { request_id } => {
+                res.set_request_id(&request_id.to_string());
                 res.init_ok();
             }
         }
@@ -191,7 +211,11 @@ impl Decode for ServerResponse {
             .get_root::<server_capnp::response::Reader>()
             .unwrap();
 
-        let request_id = response.get_request_id();
+        let request_id = response
+            .get_request_id()
+            .map_err(|_e| TransportError::Unknown)?
+            .parse()
+            .map_err(|_e| TransportError::Unknown)?;
 
         match response.which().map_err(|_e| TransportError::Unknown)? {
             server_capnp::response::Which::Result(result) => {
@@ -200,13 +224,20 @@ impl Decode for ServerResponse {
                     .map_err(|_e| TransportError::Unknown)?
                     .to_string();
 
+                let data_id = result
+                    .get_data_id()
+                    .map_err(|_e| TransportError::Unknown)?
+                    .parse()
+                    .map_err(|_e| TransportError::Unknown)?;
+
                 // Null Result?
                 Ok(ServerResponse::Result {
                     request_id,
+                    data_id: Some(data_id),
                     result: Some(value),
                 })
             }
-            server_capnp::response::Which::Ok(_) => Ok(ServerResponse::Ok(request_id)),
+            server_capnp::response::Which::Ok(_) => Ok(ServerResponse::Ok { request_id }),
             server_capnp::response::Which::Error(result) => {
                 let error = result
                     .get_message()
@@ -214,87 +245,6 @@ impl Decode for ServerResponse {
                     .to_string();
                 Ok(ServerResponse::Error { request_id, error })
             }
-        }
-    }
-
-    fn request_id(&self) -> &u64 {
-        match self {
-            ServerResponse::Error { request_id, .. } => request_id,
-            ServerResponse::Result { request_id, .. } => request_id,
-            ServerResponse::Ok(request_id) => request_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ServerCommand {
-    Get { key: String },
-    Put { key: String, value: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ServerCommandResponse {
-    Error { error: String },
-    Result { result: Option<String> },
-    Ok,
-}
-
-impl From<ServerRequest> for ServerCommand {
-    fn from(req: ServerRequest) -> Self {
-        match req {
-            ServerRequest::Get { key, .. } => ServerCommand::Get { key },
-            ServerRequest::Put { key, value, .. } => ServerCommand::Put { key, value },
-        }
-    }
-}
-
-impl From<ClientRequest> for ServerCommand {
-    fn from(req: ClientRequest) -> Self {
-        match req {
-            ClientRequest::Get { key, .. } => ServerCommand::Get { key },
-            ClientRequest::Put { key, value, .. } => ServerCommand::Put { key, value },
-        }
-    }
-}
-
-impl From<ServerResponse> for ServerCommandResponse {
-    fn from(res: ServerResponse) -> Self {
-        match res {
-            ServerResponse::Error { error, .. } => ServerCommandResponse::Error { error },
-            ServerResponse::Result { result, .. } => ServerCommandResponse::Result { result },
-            ServerResponse::Ok(_) => ServerCommandResponse::Ok,
-        }
-    }
-}
-
-impl From<RequestWithMetadata<ServerCommand>> for ServerRequest {
-    fn from(req_with_id: RequestWithMetadata<ServerCommand>) -> Self {
-        match req_with_id.request {
-            ServerCommand::Get { key } => ServerRequest::Get {
-                request_id: req_with_id.request_id,
-                key,
-            },
-            ServerCommand::Put { key, value } => ServerRequest::Put {
-                request_id: req_with_id.request_id,
-                key,
-                value,
-            },
-        }
-    }
-}
-
-impl From<RequestWithMetadata<ServerCommandResponse>> for ServerResponse {
-    fn from(res_with_id: RequestWithMetadata<ServerCommandResponse>) -> Self {
-        match res_with_id.request {
-            ServerCommandResponse::Error { error } => ServerResponse::Error {
-                request_id: res_with_id.request_id,
-                error,
-            },
-            ServerCommandResponse::Result { result } => ServerResponse::Result {
-                request_id: res_with_id.request_id,
-                result,
-            },
-            ServerCommandResponse::Ok => ServerResponse::Ok(res_with_id.request_id),
         }
     }
 }

@@ -7,7 +7,6 @@ use std::{
     fmt::Debug,
     marker::{PhantomData, Send},
     pin::Pin,
-    sync::atomic::AtomicU64,
     task::{Context, Poll},
 };
 use thiserror::Error;
@@ -118,7 +117,6 @@ pub trait Decode {
     fn decode(bytes: &[u8]) -> Result<Self, TransportError>
     where
         Self: Sized;
-    fn request_id(&self) -> &u64;
 }
 
 pub trait Encode {
@@ -176,52 +174,40 @@ pub trait MessageClient<Req, Res>: Send + Sync + Debug {
     fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>>;
 }
 
-pub struct QuicMessageClient<Req, ReqT, Res, ResT> {
-    request_counter: AtomicU64,
+pub struct QuicMessageClient<Req, Res> {
     handle: Handle,
     phantom1: PhantomData<Req>,
     phantom2: PhantomData<Res>,
-    phantom3: PhantomData<ReqT>,
-    phantom4: PhantomData<ResT>,
 }
 
-impl<Req, ReqT, Res, ResT> QuicMessageClient<Req, ReqT, Res, ResT>
+impl<Req, Res> QuicMessageClient<Req, Res>
 where
-    ReqT: Encode + Decode + Debug + From<RequestWithMetadata<Req>>,
-    ResT: Encode + Decode + Debug + Sync + Send + 'static,
+    Req: Encode + Decode + Debug,
+    Res: Encode + Decode + Debug + Sync + Send + 'static,
 {
     pub async fn new(connection: Handle) -> Result<Self, TransportError> {
         Ok(Self {
             handle: connection,
-            request_counter: AtomicU64::new(0),
             phantom1: PhantomData,
             phantom2: PhantomData,
-            phantom3: PhantomData,
-            phantom4: PhantomData,
         })
     }
 }
 
 #[async_trait]
-impl<Req, ReqT, Res, ResT> MessageClient<Req, Res> for QuicMessageClient<Req, ReqT, Res, ResT>
+impl<Req, Res> MessageClient<Req, Res> for QuicMessageClient<Req, Res>
 where
-    ReqT: Encode + Decode + From<RequestWithMetadata<Req>> + Send + Sync + Debug + 'static,
-    ResT: Encode + Decode + Debug + Send + Sync + Debug + 'static,
-    Res: From<ResT> + Send + Sync + Debug + 'static,
-    Req: Send + Sync + Debug + 'static,
+    Req: Encode + Decode + Send + Sync + Debug + 'static,
+    Res: Encode + Decode + Send + Sync + Debug + 'static,
 {
     #[instrument(skip(self), fields(message_client = "Quic"))]
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
         let stream = self.handle.open_bidirectional_stream().await?;
         let (receive_stream, mut send_stream) = stream.split();
 
-        let id = self
-            .request_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let kvrt: ReqT = RequestWithMetadata::new(id, req).into();
-        let encoded = kvrt.encode();
+        let encoded = req.encode();
         send_stream.send(encoded).await.unwrap();
-        let mut response_stream: MessageStream<ResT> = receive_stream.into();
+        let mut response_stream: MessageStream<Res> = receive_stream.into();
         let (result, _data) = response_stream
             .next()
             .await
@@ -233,16 +219,13 @@ where
     fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>> {
         Box::new(QuicMessageClient {
             handle: self.handle.clone(),
-            request_counter: AtomicU64::new(0),
             phantom1: PhantomData,
             phantom2: PhantomData,
-            phantom3: PhantomData::<ReqT>,
-            phantom4: PhantomData::<ResT>,
         })
     }
 }
 
-impl<Req, ReqT, Res, ResT> Debug for QuicMessageClient<Req, ReqT, Res, ResT> {
+impl<Req, Res> Debug for QuicMessageClient<Req, Res> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuicMessageClient")
             .field("socket", &self.handle.remote_addr().unwrap())
@@ -303,13 +286,14 @@ impl<Req, Res> Debug for ChannelMessageClient<Req, Res> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RequestWithMetadata<Req> {
-    pub request_id: u64,
+    pub request_id: uhlc::Timestamp,
     pub request: Req,
 }
 
 impl<Req> RequestWithMetadata<Req> {
-    pub fn new(request_id: u64, request: Req) -> Self {
+    pub fn new(request_id: uhlc::Timestamp, request: Req) -> Self {
         Self {
             request_id,
             request,

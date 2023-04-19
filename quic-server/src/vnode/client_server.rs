@@ -1,6 +1,6 @@
 use crate::{
     message_clients::MessageClients,
-    protocol::{ServerCommandResponse, ServerResponse},
+    protocol::{ServerRequest, ServerResponse},
     vnode::client_mdns::ClientMDNS,
     ServerError,
 };
@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use itertools::Itertools;
 use quic_client::protocol::{ClientRequest, ClientResponse};
-use quic_transport::{DataStream, Decode, Encode, MessageStream};
+use quic_transport::{DataStream, Encode, MessageStream};
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
 use std::{net::Ipv4Addr, sync::Arc, usize};
 use tokio::{
@@ -31,6 +31,7 @@ static CONSISTENCY_LEVEL: usize = match (REPLICATION_FACTOR / 2, REPLICATION_FAC
 
 pub(crate) struct ClientServer {
     clients: Arc<Mutex<MessageClients>>,
+    hlc: Arc<Mutex<uhlc::HLC>>,
     storage: db::Database,
     server: s2n_quic::Server,
 }
@@ -56,7 +57,7 @@ impl ClientServer {
             .map_err(|e| ServerError::Initialization(e.to_string()))?
             .port();
 
-        log::debug!("Starting Client Server on Port: {}", port);
+        println!("Starting Client Server on Port: {}", port);
 
         let _mdns = ClientMDNS::new(node_id, core_id, local_ip, port);
 
@@ -64,14 +65,16 @@ impl ClientServer {
             clients,
             storage,
             server,
+            hlc: Arc::new(Mutex::new(uhlc::HLC::default())),
         })
     }
 
-    #[instrument(skip(clients, send_tx))]
+    #[instrument(skip(clients, send_tx, hlc))]
     async fn handle_request(
         req: ClientRequest,
         clients: Arc<Mutex<MessageClients>>,
         storage: db::Database,
+        hlc: Arc<Mutex<uhlc::HLC>>,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
         let mut join_set: JoinSet<Result<ClientResponse, ServerError>> = JoinSet::new();
@@ -80,17 +83,45 @@ impl ClientServer {
 
         event!(Level::DEBUG, "replicas" = ?replicas);
 
+        let local_request_id = hlc.lock().await.new_timestamp();
+        let client_request_id = req.request_id().clone();
+        let is_put = match req {
+            ClientRequest::Put { .. } => true,
+            _ => false,
+        };
+
+        let server_request = match req {
+            ClientRequest::Get { key, .. } => ServerRequest::Get {
+                request_id: local_request_id,
+                key,
+            },
+            ClientRequest::Put { key, value, .. } => ServerRequest::Put {
+                request_id: local_request_id,
+                key,
+                value,
+            },
+        };
+
         for connection in replicas {
-            let req = req.clone();
+            // let req = req.clone();
+            let client_request_id = client_request_id.clone();
+            let server_request = server_request.clone();
 
             join_set.spawn({
                 async move {
-                    let request_id = req.request_id().clone();
-                    let res = connection.box_clone().request(req.into()).await?;
+                    // let client_request_id = req.request_id().clone();
+                    // let server_request = req.into();
+                    let res = connection.box_clone().request(server_request).await?;
                     let res: ClientResponse = match res {
-                        ServerCommandResponse::Error { error } => ClientResponse::Error { request_id, error },
-                        ServerCommandResponse::Result { result } => ClientResponse::Result { request_id, result },
-                        ServerCommandResponse::Ok => ClientResponse::Ok(request_id),
+                        ServerResponse::Error { error, .. } => ClientResponse::Error {
+                            request_id: client_request_id,
+                            error,
+                        },
+                        ServerResponse::Result { result, .. } => ClientResponse::Result {
+                            request_id: client_request_id,
+                            result,
+                        },
+                        ServerResponse::Ok { .. } => ClientResponse::Ok(client_request_id),
                     };
 
                     Ok::<ClientResponse, ServerError>(res)
@@ -137,7 +168,8 @@ impl ClientServer {
                     break;
                 } else if results.len() == REPLICATION_FACTOR {
                     let res = ServerResponse::Error {
-                        request_id: *req.request_id(),
+                        // request_id: *req.request_id(),
+                        request_id: client_request_id,
                         error: "Results did not match".to_string(),
                     };
                     send_tx
@@ -152,7 +184,8 @@ impl ClientServer {
 
         // For put requests, we want to let all of the writes finish, even if we've hit the
         // requested Consistency Level
-        if let ClientRequest::Put { .. } = req {
+        // if let ClientRequest::Put { .. } = req {
+        if is_put {
             join_set.detach_all();
         }
 
@@ -163,6 +196,7 @@ impl ClientServer {
         stream: BidirectionalStream,
         clients: Arc<Mutex<MessageClients>>,
         storage: db::Database,
+        hlc: Arc<Mutex<uhlc::HLC>>,
     ) {
         let (receive_stream, mut send_stream) = stream.split();
         let data_stream = DataStream::new(receive_stream);
@@ -183,7 +217,10 @@ impl ClientServer {
             let storage = storage.clone();
             let clients = clients.clone();
             let send_tx = send_tx.clone();
-            tokio::spawn(async move { Self::handle_request(req, clients, storage, send_tx).await });
+            let hlc = hlc.clone();
+            tokio::spawn(
+                async move { Self::handle_request(req, clients, storage, hlc, send_tx).await },
+            );
         }
     }
 
@@ -191,24 +228,28 @@ impl ClientServer {
         mut connection: connection::Connection,
         clients: Arc<Mutex<MessageClients>>,
         storage: db::Database,
+        hlc: Arc<Mutex<uhlc::HLC>>,
     ) {
         while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
             tokio::spawn(Self::handle_stream(
                 stream,
                 clients.clone(),
                 storage.clone(),
+                hlc.clone(),
             ));
         }
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), ServerError> {
         let storage = self.storage.clone();
+        let hlc = self.hlc.clone();
 
         while let Some(connection) = self.server.accept().await {
             tokio::spawn(Self::handle_connection(
                 connection,
                 self.clients.clone(),
                 storage.clone(),
+                hlc.clone(),
             ));
         }
 

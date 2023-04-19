@@ -2,10 +2,14 @@ mod mdns;
 mod protocol;
 
 use env_logger::Env;
-use protocol::{ClientCommand, ClientRequest, ClientCommandResponse, ClientResponse};
+use protocol::{ClientRequest, ClientResponse};
 use quic_client::DistKVClient;
 use quic_transport::MessageClient;
-use std::{error::Error, thread};
+use std::{
+    error::Error,
+    sync::{Arc, Mutex},
+    thread,
+};
 use tokio::sync::mpsc::channel;
 
 pub mod client_capnp {
@@ -24,32 +28,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     mdns_rx.changed().await?;
     let server_cons = mdns.rx.borrow();
     let addr = server_cons.iter().next().unwrap();
+    let hlc = Arc::new(Mutex::new(uhlc::HLC::default()));
     println!("Client Found: {:?}", addr);
 
-    let client: DistKVClient<ClientCommand, ClientRequest, ClientCommandResponse, ClientResponse> =
-        DistKVClient::new()?;
+    let client: DistKVClient<ClientRequest, ClientResponse> = DistKVClient::new()?;
     let connection = client.connect(*addr).await?;
     let mut stream = connection.stream().await?;
 
     println!("Client Ready");
 
-    let (tx, mut rx) = channel::<ClientCommand>(1);
+    let (tx, mut rx) = channel::<ClientRequest>(1);
 
     let cli = thread::spawn(move || {
-        std::io::stdin()
-            .lines()
-            .for_each(|line| match handle_input_line(line.unwrap()) {
+        for line in std::io::stdin().lines() {
+            let hlc = hlc.clone();
+            match handle_input_line(hlc, line.unwrap()) {
                 Some(req) => {
                     tx.blocking_send(req).unwrap();
                 }
                 None => (),
-            })
+            }
+        }
     });
 
     tokio::spawn(async move {
         loop {
             if let Some(req) = rx.recv().await {
-                let response: ClientCommandResponse = stream.request(req).await.unwrap().into();
+                let response: ClientResponse = stream.request(req).await.unwrap().into();
                 println!("Response: {:?}", response);
             }
         }
@@ -62,7 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn handle_input_line(line: String) -> Option<ClientCommand> {
+fn handle_input_line(hlc: Arc<Mutex<uhlc::HLC>>, line: String) -> Option<ClientRequest> {
     let mut args = line.split(' ');
 
     let next = args.next().map(|x| x.to_uppercase());
@@ -78,7 +83,8 @@ fn handle_input_line(line: String) -> Option<ClientCommand> {
                     }
                 }
             };
-            Some(ClientCommand::Get {
+            Some(ClientRequest::Get {
+                request_id: hlc.lock().unwrap().new_timestamp(),
                 key: key.to_string(),
             })
         }
@@ -102,7 +108,8 @@ fn handle_input_line(line: String) -> Option<ClientCommand> {
                 }
             };
 
-            Some(ClientCommand::Put {
+            Some(ClientRequest::Put {
+                request_id: hlc.lock().unwrap().new_timestamp(),
                 key: key.to_string(),
                 value: value.to_string(),
             })

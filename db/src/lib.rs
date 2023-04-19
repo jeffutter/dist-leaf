@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use rocksdb::DB;
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use thiserror::Error;
 use tracing::instrument;
@@ -11,6 +12,21 @@ pub enum DatabaseError {
     RocksDB(#[from] rocksdb::Error),
     #[error("unknown database error")]
     Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DBValue<'data> {
+    pub ts: uhlc::Timestamp,
+    pub data: Cow<'data, str>,
+}
+
+impl<'a> DBValue<'a> {
+    pub fn new(data: &'a str, ts: uhlc::Timestamp) -> Self {
+        Self {
+            ts,
+            data: Cow::Borrowed(data),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -31,18 +47,19 @@ impl Database {
     }
 
     #[instrument]
-    pub fn put(&self, key: &str, value: &str) -> Result<(), DatabaseError> {
-        self.db.put(key.as_bytes(), value.as_bytes())?;
+    pub fn put(&self, key: &str, value: &DBValue) -> Result<(), DatabaseError> {
+        let encoded: Vec<u8> = bincode::serialize(&value).unwrap();
+        self.db.put(key.as_bytes(), encoded)?;
 
         Ok(())
     }
 
     #[instrument]
-    pub fn get(&self, key: &str) -> Result<Option<String>, DatabaseError> {
+    pub fn get(&self, key: &str) -> Result<Option<DBValue>, DatabaseError> {
         match self.db.get(key.as_bytes())? {
             Some(v) => {
-                let result = String::from_utf8(v).unwrap();
-                Ok(Some(result))
+                let decoded: DBValue = bincode::deserialize(&v).unwrap();
+                Ok(Some(decoded.clone()))
             }
             None => Ok(None),
         }
@@ -52,5 +69,27 @@ impl Database {
     pub fn delete(&self, key: &str) -> Result<(), DatabaseError> {
         self.db.delete(key.as_bytes())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
+
+    #[test]
+    fn round_trip() {
+        let db = Database::new_tmp();
+        let hlc = uhlc::HLC::default();
+        let key = "key";
+        let value = "value";
+        let db_value = DBValue::new(value, hlc.new_timestamp());
+
+        db.put(key, &db_value).unwrap();
+
+        let res = db.get(key).unwrap().unwrap();
+
+        assert_eq!(db_value.ts, res.ts);
+        assert_eq!(db_value.data, res.data);
     }
 }

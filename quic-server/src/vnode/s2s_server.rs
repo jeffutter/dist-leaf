@@ -1,11 +1,12 @@
 use crate::{
     message_clients::MessageClients,
-    protocol::{ServerCommand, ServerRequest, ServerCommandResponse, ServerResponse},
+    protocol::{ServerRequest, ServerResponse},
     ServerError,
 };
 use bytes::Bytes;
+use db::DBValue;
 use futures::StreamExt;
-use quic_transport::{DataStream, Decode, Encode, MessageStream, RequestWithMetadata};
+use quic_transport::{DataStream, Encode, MessageStream};
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
 use std::{net::Ipv4Addr, sync::Arc};
 use tokio::{
@@ -26,7 +27,7 @@ pub(crate) struct S2SServer {
     storage: db::Database,
     pub(crate) mdns: S2SMDNS,
     server: s2n_quic::Server,
-    rx: mpsc::Receiver<(ServerCommand, oneshot::Sender<ServerCommandResponse>)>,
+    rx: mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>,
 }
 
 impl S2SServer {
@@ -34,7 +35,7 @@ impl S2SServer {
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        rx: mpsc::Receiver<(ServerCommand, oneshot::Sender<ServerCommandResponse>)>,
+        rx: mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>,
         storage: db::Database,
         clients: Arc<Mutex<MessageClients>>,
     ) -> Result<Self, ServerError> {
@@ -64,31 +65,45 @@ impl S2SServer {
     }
 
     #[instrument]
-    async fn handle_local(req: ServerCommand, storage: db::Database) -> Result<ServerCommandResponse, ServerError> {
+    async fn handle_local(
+        req: ServerRequest,
+        storage: db::Database,
+    ) -> Result<ServerResponse, ServerError> {
         match req {
-            ServerCommand::Get { key } => {
-                let res_data = storage.get(&key)?;
-                let res = ServerCommandResponse::Result { result: res_data };
+            ServerRequest::Get { request_id, key } => {
+                let result = storage.get(&key)?;
+                let res = match result {
+                    Some(data) => ServerResponse::Result {
+                        request_id,
+                        data_id: Some(data.ts),
+                        result: Some(data.data.to_string()),
+                    },
+                    None => ServerResponse::Result {
+                        request_id,
+                        data_id: None,
+                        result: None,
+                    },
+                };
                 Ok(res)
             }
-            ServerCommand::Put { key, value } => {
-                storage.put(&key, &value)?;
-                let res = ServerCommandResponse::Ok;
+            ServerRequest::Put {
+                request_id,
+                key,
+                value,
+            } => {
+                storage.put(&key, &DBValue::new(&value, request_id))?;
+                let res = ServerResponse::Ok { request_id };
                 Ok(res)
             }
         }
     }
 
-    #[instrument(skip(send_tx))]
     async fn handle_local_req(
         req: ServerRequest,
         storage: db::Database,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
-        let request_id = req.request_id().clone();
-        let res = Self::handle_local(req.into(), storage).await?;
-        let res = RequestWithMetadata::new(request_id, res);
-        let res: ServerResponse = res.into();
+        let res = Self::handle_local(req, storage).await?;
         let encoded = res.encode();
         send_tx.send(encoded).await.expect("stream should be open");
         Ok(())
@@ -129,6 +144,7 @@ impl S2SServer {
         loop {
             let storage = storage.clone();
             select! {
+                // Quic
                 Some(connection) = self.server.accept() => {
                     // spawn a new task for the connection
                     tokio::spawn(Self::handle_connection(
@@ -136,6 +152,7 @@ impl S2SServer {
                         storage.clone(),
                     ));
                 }
+                // Channel
                 Some((req, tx)) = self.rx.recv() => {
                     tokio::spawn(async move {
                         let res = Self::handle_local(req, storage).await?;

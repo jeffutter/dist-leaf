@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
-use quic_transport::{Decode, Encode, RequestWithMetadata, TransportError};
+use quic_transport::{Decode, Encode, TransportError};
 use std::io::Write;
 use tracing::instrument;
 
@@ -9,11 +9,11 @@ use crate::client_capnp;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientRequest {
     Get {
-        request_id: u64,
+        request_id: uhlc::Timestamp,
         key: String,
     },
     Put {
-        request_id: u64,
+        request_id: uhlc::Timestamp,
         key: String,
         value: String,
     },
@@ -24,6 +24,13 @@ impl ClientRequest {
         match self {
             ClientRequest::Get { key, .. } => key,
             ClientRequest::Put { key, .. } => key,
+        }
+    }
+
+    pub fn request_id(&self) -> &uhlc::Timestamp {
+        match self {
+            ClientRequest::Get { request_id, .. } => request_id,
+            ClientRequest::Put { request_id, .. } => request_id,
         }
     }
 }
@@ -37,7 +44,7 @@ impl Encode for ClientRequest {
 
         match self {
             ClientRequest::Get { request_id, key } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 let mut get = res.init_get();
                 get.set_key(&key);
             }
@@ -46,7 +53,7 @@ impl Encode for ClientRequest {
                 key,
                 value,
             } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 let mut put = res.init_put();
                 put.set_key(&key);
                 put.set_value(&value);
@@ -74,7 +81,11 @@ impl Decode for ClientRequest {
             .get_root::<client_capnp::request::Reader>()
             .unwrap();
 
-        let request_id = request.get_request_id();
+        let request_id = request
+            .get_request_id()
+            .map_err(|_e| TransportError::Unknown)?
+            .parse()
+            .map_err(|_e| TransportError::Unknown)?;
 
         match request.which().map_err(|_e| TransportError::Unknown)? {
             client_capnp::request::Which::Get(get_request) => {
@@ -104,26 +115,19 @@ impl Decode for ClientRequest {
             }
         }
     }
-
-    fn request_id(&self) -> &u64 {
-        match self {
-            ClientRequest::Get { request_id, .. } => request_id,
-            ClientRequest::Put { request_id, .. } => request_id,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ClientResponse {
     Error {
-        request_id: u64,
+        request_id: uhlc::Timestamp,
         error: String,
     },
     Result {
-        request_id: u64,
+        request_id: uhlc::Timestamp,
         result: Option<String>,
     },
-    Ok(u64),
+    Ok(uhlc::Timestamp),
 }
 
 impl Encode for ClientResponse {
@@ -135,25 +139,25 @@ impl Encode for ClientResponse {
 
         match self {
             ClientResponse::Error { request_id, error } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 res.init_error().set_message(&error);
             }
             ClientResponse::Result {
                 request_id,
                 result: Some(x),
             } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 res.init_result().set_value(&x);
             }
             ClientResponse::Result {
                 request_id,
                 result: None,
             } => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 res.init_result();
             }
             ClientResponse::Ok(request_id) => {
-                res.set_request_id(*request_id);
+                res.set_request_id(&request_id.to_string());
                 res.init_ok();
             }
         }
@@ -179,7 +183,11 @@ impl Decode for ClientResponse {
             .get_root::<client_capnp::response::Reader>()
             .unwrap();
 
-        let request_id = response.get_request_id();
+        let request_id = response
+            .get_request_id()
+            .map_err(|_e| TransportError::Unknown)?
+            .parse()
+            .map_err(|_e| TransportError::Unknown)?;
 
         match response.which().map_err(|_e| TransportError::Unknown)? {
             client_capnp::response::Which::Result(result) => {
@@ -202,81 +210,6 @@ impl Decode for ClientResponse {
                     .to_string();
                 Ok(ClientResponse::Error { request_id, error })
             }
-        }
-    }
-
-    fn request_id(&self) -> &u64 {
-        match self {
-            ClientResponse::Error { request_id, .. } => request_id,
-            ClientResponse::Result { request_id, .. } => request_id,
-            ClientResponse::Ok(request_id) => request_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClientCommand {
-    Get { key: String },
-    Put { key: String, value: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClientCommandResponse {
-    Error { error: String },
-    Result { result: Option<String> },
-    Ok,
-}
-
-impl From<RequestWithMetadata<ClientRequest>> for ClientRequest {
-    fn from(req_with_id: RequestWithMetadata<ClientRequest>) -> Self {
-        req_with_id.request
-    }
-}
-
-impl From<RequestWithMetadata<ClientResponse>> for ClientResponse {
-    fn from(res_with_id: RequestWithMetadata<ClientResponse>) -> Self {
-        res_with_id.request
-    }
-}
-
-impl From<ClientResponse> for ClientCommandResponse {
-    fn from(response: ClientResponse) -> Self {
-        match response {
-            ClientResponse::Error { error, .. } => ClientCommandResponse::Error { error },
-            ClientResponse::Result { result, .. } => ClientCommandResponse::Result { result },
-            ClientResponse::Ok(_) => ClientCommandResponse::Ok,
-        }
-    }
-}
-
-impl From<RequestWithMetadata<ClientCommand>> for ClientRequest {
-    fn from(req_with_id: RequestWithMetadata<ClientCommand>) -> Self {
-        match req_with_id.request {
-            ClientCommand::Get { key } => ClientRequest::Get {
-                request_id: req_with_id.request_id,
-                key,
-            },
-            ClientCommand::Put { key, value } => ClientRequest::Put {
-                request_id: req_with_id.request_id,
-                key,
-                value,
-            },
-        }
-    }
-}
-
-impl From<RequestWithMetadata<ClientCommandResponse>> for ClientResponse {
-    fn from(res_with_id: RequestWithMetadata<ClientCommandResponse>) -> Self {
-        match res_with_id.request {
-            ClientCommandResponse::Error { error } => ClientResponse::Error {
-                request_id: res_with_id.request_id,
-                error,
-            },
-            ClientCommandResponse::Result { result } => ClientResponse::Result {
-                request_id: res_with_id.request_id,
-                result,
-            },
-            ClientCommandResponse::Ok => ClientResponse::Ok(res_with_id.request_id),
         }
     }
 }

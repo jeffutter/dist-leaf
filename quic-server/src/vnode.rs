@@ -4,12 +4,13 @@ pub(crate) mod s2s_mdns;
 mod s2s_server;
 
 use crate::{
-    protocol::{ServerCommand, ServerCommandResponse},
     message_clients,
+    protocol::{ServerRequest, ServerResponse},
     vnode::{client_server::ClientServer, s2s_server::S2SServer},
     ServerError,
 };
 use async_trait::async_trait;
+use db::DBValue;
 use quic_client::DistKVClient;
 use quic_transport::{ChannelMessageClient, MessageClient, TransportError};
 use std::fmt::Debug;
@@ -43,8 +44,8 @@ impl VNode {
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        rx: mpsc::Receiver<(ServerCommand, oneshot::Sender<ServerCommandResponse>)>,
-        vnode_to_cmc: HashMap<VNodeId, ChannelMessageClient<ServerCommand, ServerCommandResponse>>,
+        rx: mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>,
+        vnode_to_cmc: HashMap<VNodeId, ChannelMessageClient<ServerRequest, ServerResponse>>,
     ) -> Result<Self, ServerError> {
         let vnode_id = VNodeId::new(node_id, core_id);
         let client = DistKVClient::new().unwrap();
@@ -97,29 +98,46 @@ impl LocalMessageClient {
 }
 
 #[async_trait]
-impl MessageClient<ServerCommand, ServerCommandResponse> for LocalMessageClient {
+impl MessageClient<ServerRequest, ServerResponse> for LocalMessageClient {
     #[instrument(skip(self), fields(message_client = "Local"))]
-    async fn request(&mut self, req: ServerCommand) -> Result<ServerCommandResponse, TransportError> {
+    async fn request(&mut self, req: ServerRequest) -> Result<ServerResponse, TransportError> {
         match req {
-            ServerCommand::Get { key } => {
+            ServerRequest::Get { request_id, key } => {
                 let res_data = self
                     .storage
                     .get(&key)
                     .map_err(|e| TransportError::UnknownMsg(e.to_string()))?;
-                let res = ServerCommandResponse::Result { result: res_data };
+
+                let res = match res_data {
+                    Some(data) => ServerResponse::Result {
+                        request_id,
+                        data_id: Some(data.ts),
+                        result: Some(data.data.to_string()),
+                    },
+                    None => ServerResponse::Result {
+                        request_id,
+                        data_id: None,
+                        result: None,
+                    },
+                };
+
                 Ok(res)
             }
-            ServerCommand::Put { key, value } => {
+            ServerRequest::Put {
+                request_id,
+                key,
+                value,
+            } => {
                 self.storage
-                    .put(&key, &value)
+                    .put(&key, &DBValue::new(&value, request_id))
                     .map_err(|e| TransportError::UnknownMsg(e.to_string()))?;
-                let res = ServerCommandResponse::Ok;
+                let res = ServerResponse::Ok { request_id };
                 Ok(res)
             }
         }
     }
 
-    fn box_clone(&self) -> Box<dyn MessageClient<ServerCommand, ServerCommandResponse>> {
+    fn box_clone(&self) -> Box<dyn MessageClient<ServerRequest, ServerResponse>> {
         Box::new(LocalMessageClient {
             storage: self.storage.clone(),
         })

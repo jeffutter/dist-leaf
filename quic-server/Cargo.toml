@@ -28,6 +28,7 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3"
 itertools = "0.10"
 async-trait = "0.1"
+uhlc = "0.5"
 
 [build-dependencies]
 capnpc = "0.16"

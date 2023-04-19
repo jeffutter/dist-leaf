@@ -18,6 +18,7 @@ bytes = "1"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3"
 mdns-sd = "0.7.1"
+uhlc = "0.5"
 
 [build-dependencies]
 capnpc = "0.16"
