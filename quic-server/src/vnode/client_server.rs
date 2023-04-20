@@ -103,14 +103,11 @@ impl ClientServer {
         };
 
         for connection in replicas {
-            // let req = req.clone();
             let client_request_id = client_request_id.clone();
             let server_request = server_request.clone();
 
             join_set.spawn({
                 async move {
-                    // let client_request_id = req.request_id().clone();
-                    // let server_request = req.into();
                     let res = connection.box_clone().request(server_request).await?;
                     let res: ClientResponse = match res {
                         ServerResponse::Error { error, .. } => ClientResponse::Error {
@@ -129,12 +126,9 @@ impl ClientServer {
             });
         }
 
-        let mut results: Mutex<Vec<Option<Result<ClientResponse, ServerError>>>> =
-            Mutex::new(Vec::new());
+        let mut results: Vec<Option<Result<ClientResponse, ServerError>>> = Vec::new();
 
         while let Some(res) = join_set.join_next().await {
-            let results = results.get_mut();
-
             match res {
                 Ok(Ok(res)) => results.push(Some(Ok(res))),
                 Ok(Err(e)) => results.push(Some(Err(e))),
@@ -168,7 +162,6 @@ impl ClientServer {
                     break;
                 } else if results.len() == REPLICATION_FACTOR {
                     let res = ServerResponse::Error {
-                        // request_id: *req.request_id(),
                         request_id: client_request_id,
                         error: "Results did not match".to_string(),
                     };
