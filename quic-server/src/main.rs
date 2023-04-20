@@ -35,6 +35,8 @@ pub enum ServerError {
     Unknown,
     #[error("initialization error: {}", .0)]
     Initialization(String),
+    #[error("response error: {}", .0)]
+    Response(String),
 }
 
 #[tokio::main]

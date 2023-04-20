@@ -6,11 +6,10 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use itertools::Itertools;
 use quic_client::protocol::{ClientRequest, ClientResponse};
 use quic_transport::{DataStream, Encode, MessageStream};
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
-use std::{net::Ipv4Addr, sync::Arc, usize};
+use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
 use tokio::{
     sync::{mpsc, Mutex},
     task::JoinSet,
@@ -77,7 +76,7 @@ impl ClientServer {
         hlc: Arc<Mutex<uhlc::HLC>>,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
-        let mut join_set: JoinSet<Result<ClientResponse, ServerError>> = JoinSet::new();
+        let mut join_set: JoinSet<Result<ServerResponse, ServerError>> = JoinSet::new();
         let mut cs = clients.lock().await;
         let replicas = cs.replicas(req.key(), REPLICATION_FACTOR).await;
 
@@ -103,76 +102,97 @@ impl ClientServer {
         };
 
         for connection in replicas {
-            let client_request_id = client_request_id.clone();
             let server_request = server_request.clone();
 
             join_set.spawn({
                 async move {
                     let res = connection.box_clone().request(server_request).await?;
-                    let res: ClientResponse = match res {
-                        ServerResponse::Error { error, .. } => ClientResponse::Error {
-                            request_id: client_request_id,
-                            error,
-                        },
-                        ServerResponse::Result { result, .. } => ClientResponse::Result {
-                            request_id: client_request_id,
-                            result,
-                        },
-                        ServerResponse::Ok { .. } => ClientResponse::Ok(client_request_id),
-                    };
 
-                    Ok::<ClientResponse, ServerError>(res)
+                    Ok::<_, ServerError>(res)
                 }
             });
         }
 
-        let mut results: Vec<Option<Result<ClientResponse, ServerError>>> = Vec::new();
+        let mut results: HashMap<ServerResponse, usize> = HashMap::new();
+        let mut received_responses = 0;
+        let mut result_sent = false;
 
         while let Some(res) = join_set.join_next().await {
-            match res {
-                Ok(Ok(res)) => results.push(Some(Ok(res))),
-                Ok(Err(e)) => results.push(Some(Err(e))),
-                Err(_e) => results.push(Some(Err(ServerError::Unknown))),
-            }
+            received_responses += 1;
 
-            if results.len() >= CONSISTENCY_LEVEL {
-                let unique_res: Vec<ClientResponse> = results
-                    .iter()
-                    .filter_map(|x| match x {
-                        Some(Ok(res)) => Some(res.clone()),
-                        _ => None,
-                    })
-                    .unique()
-                    .collect();
+            let r = match res {
+                Ok(Ok(ServerResponse::Error { error, .. })) => Err(ServerError::Response(error)),
+                Ok(Ok(res)) => Ok(res),
+                Ok(Err(e)) => Err(e),
+                Err(_e) => Err(ServerError::Unknown),
+            };
 
-                if unique_res.len() == 1 {
-                    let res = &unique_res[0];
+            match r {
+                Ok(r) => {
+                    results
+                        .entry(r.clone())
+                        .and_modify(|i| *i += 1)
+                        .or_insert(1);
 
-                    send_tx
-                        .send(res.encode())
-                        .await
-                        .expect("channel should be open");
+                    if results[&r] >= CONSISTENCY_LEVEL {
+                        let response = match r {
+                            ServerResponse::Ok { .. } => ClientResponse::Ok(client_request_id),
+                            ServerResponse::Error { .. } => unreachable!(),
+                            ServerResponse::Result { result, .. } => ClientResponse::Result {
+                                result,
+                                request_id: client_request_id,
+                            },
+                        };
 
-                    event!(
-                        Level::INFO,
-                        "Results matched with {} request(s)",
-                        results.len()
-                    );
+                        send_tx
+                            .send(response.encode())
+                            .await
+                            .expect("channel sould be open");
 
-                    break;
-                } else if results.len() == REPLICATION_FACTOR {
-                    let res = ServerResponse::Error {
-                        request_id: client_request_id,
-                        error: "Results did not match".to_string(),
-                    };
-                    send_tx
-                        .send(res.encode())
-                        .await
-                        .expect("channel should be open");
+                        result_sent = true;
 
-                    event!(Level::ERROR, results = ?results, "Results did not match");
+                        event!(
+                            Level::INFO,
+                            "Results matched with {} request(s)",
+                            results.len()
+                        );
+
+                        break;
+                    }
+
+                    if received_responses >= REPLICATION_FACTOR {
+                        let res = ClientResponse::Error {
+                            request_id: client_request_id,
+                            error: "Results did not match".to_string(),
+                        };
+
+                        send_tx
+                            .send(res.encode())
+                            .await
+                            .expect("channel should be open");
+                        result_sent = true;
+
+                        event!(Level::ERROR, results = ?results, "Results did not match");
+
+                        break;
+                    }
+                }
+                Err(e) => {
+                    event!(Level::ERROR, error = ?e, "Error fetching from another server");
                 }
             }
+        }
+
+        if result_sent == false {
+            let res = ClientResponse::Error {
+                request_id: client_request_id,
+                error: "Could not fetch enough results".to_string(),
+            };
+
+            send_tx
+                .send(res.encode())
+                .await
+                .expect("channel should be open");
         }
 
         // For put requests, we want to let all of the writes finish, even if we've hit the
