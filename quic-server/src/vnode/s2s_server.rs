@@ -153,9 +153,12 @@ impl S2SServer {
                 }
                 // Channel
                 Some((req, tx)) = self.rx.recv() => {
+                    // Intentionally don't check for errors/unrwrap as `tx` may have been
+                    // closed by the other end if the request has already been filled
+                    #[allow(unused_must_use)]
                     tokio::spawn(async move {
                         let res = Self::handle_local(req, storage).await?;
-                        tx.send(res).expect("channel should be open");
+                        tx.send(res);
 
                         Ok::<(), ServerError>(())
                     });
