@@ -139,24 +139,23 @@ impl S2SServer {
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), ServerError> {
-        let storage = self.storage.clone();
-
         loop {
-            let storage = storage.clone();
+            let storage = self.storage.clone();
+
             select! {
                 // Quic
                 Some(connection) = self.server.accept() => {
                     // spawn a new task for the connection
                     tokio::spawn(Self::handle_connection(
                         connection,
-                        storage.clone(),
+                        storage,
                     ));
                 }
                 // Channel
                 Some((req, tx)) = self.rx.recv() => {
                     tokio::spawn(async move {
                         let res = Self::handle_local(req, storage).await?;
-                        tx.send(res.clone()).expect("channel should be open");
+                        tx.send(res).expect("channel should be open");
 
                         Ok::<(), ServerError>(())
                     });
