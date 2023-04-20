@@ -65,13 +65,7 @@ impl VNode {
             storage.clone(),
             connections.clone(),
         )?;
-        let client_server = ClientServer::new(
-            node_id,
-            core_id,
-            local_ip,
-            storage.clone(),
-            connections.clone(),
-        )?;
+        let client_server = ClientServer::new(node_id, core_id, local_ip, connections.clone())?;
 
         Ok(Self {
             client_server,

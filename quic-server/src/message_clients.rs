@@ -70,15 +70,33 @@ impl MessageClients {
         self.clients.get(vnode_id).unwrap().box_clone()
     }
 
+    pub(crate) fn get_for_vnodes(
+        &mut self,
+        vnode_ids: Vec<&VNodeId>,
+    ) -> Vec<Box<dyn MessageClient<ServerRequest, ServerResponse>>> {
+        vnode_ids
+            .iter()
+            .map(|vnode_id| self.clients.get(vnode_id).unwrap().box_clone())
+            .collect()
+    }
+
     pub(crate) async fn replicas(
         &mut self,
         key: &str,
         n: usize,
-    ) -> Vec<Box<dyn MessageClient<ServerRequest, ServerResponse>>> {
+    ) -> Vec<(
+        VNodeId,
+        Box<dyn MessageClient<ServerRequest, ServerResponse>>,
+    )> {
         self.ring
             .replicas(key)
             .take(n)
-            .map(|vnode_id| self.clients.get(vnode_id).unwrap().box_clone())
+            .map(|vnode_id| {
+                (
+                    vnode_id.clone(),
+                    self.clients.get(vnode_id).unwrap().box_clone(),
+                )
+            })
             .collect()
     }
 }

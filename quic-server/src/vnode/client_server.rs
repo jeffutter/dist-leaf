@@ -1,7 +1,7 @@
 use crate::{
     message_clients::MessageClients,
     protocol::{ServerRequest, ServerResponse},
-    vnode::client_mdns::ClientMDNS,
+    vnode::{client_mdns::ClientMDNS, VNodeId},
     ServerError,
 };
 use bytes::Bytes;
@@ -31,7 +31,6 @@ static CONSISTENCY_LEVEL: usize = match (REPLICATION_FACTOR / 2, REPLICATION_FAC
 pub(crate) struct ClientServer {
     clients: Arc<Mutex<MessageClients>>,
     hlc: Arc<Mutex<uhlc::HLC>>,
-    storage: db::Database,
     server: s2n_quic::Server,
 }
 
@@ -40,7 +39,6 @@ impl ClientServer {
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        storage: db::Database,
         clients: Arc<Mutex<MessageClients>>,
     ) -> Result<Self, ServerError> {
         let server = Server::builder()
@@ -62,7 +60,6 @@ impl ClientServer {
 
         Ok(Self {
             clients,
-            storage,
             server,
             hlc: Arc::new(Mutex::new(uhlc::HLC::default())),
         })
@@ -72,13 +69,13 @@ impl ClientServer {
     async fn handle_request(
         req: ClientRequest,
         clients: Arc<Mutex<MessageClients>>,
-        storage: db::Database,
         hlc: Arc<Mutex<uhlc::HLC>>,
         send_tx: mpsc::Sender<Bytes>,
     ) -> Result<(), ServerError> {
-        let mut join_set: JoinSet<Result<ServerResponse, ServerError>> = JoinSet::new();
+        let mut join_set: JoinSet<Result<(VNodeId, ServerResponse), ServerError>> = JoinSet::new();
+        let req_key = req.key().clone();
         let mut cs = clients.lock().await;
-        let replicas = cs.replicas(req.key(), REPLICATION_FACTOR).await;
+        let replicas = cs.replicas(&req_key, REPLICATION_FACTOR).await;
 
         event!(Level::DEBUG, "replicas" = ?replicas);
 
@@ -101,19 +98,22 @@ impl ClientServer {
             },
         };
 
-        for connection in replicas {
+        for (vnode_id, connection) in replicas.iter() {
+            let vnode_id = vnode_id.clone();
+            let mut connection = connection.box_clone();
+
             let server_request = server_request.clone();
 
             join_set.spawn({
                 async move {
-                    let res = connection.box_clone().request(server_request).await?;
+                    let res = connection.request(server_request).await?;
 
-                    Ok::<_, ServerError>(res)
+                    Ok::<_, ServerError>((vnode_id, res))
                 }
             });
         }
 
-        let mut results: HashMap<ServerResponse, usize> = HashMap::new();
+        let mut results: HashMap<ServerResponse, (usize, Vec<VNodeId>)> = HashMap::new();
         let mut received_responses = 0;
         let mut result_sent = false;
 
@@ -121,25 +121,30 @@ impl ClientServer {
             received_responses += 1;
 
             let r = match res {
-                Ok(Ok(ServerResponse::Error { error, .. })) => Err(ServerError::Response(error)),
+                Ok(Ok((_, ServerResponse::Error { error, .. }))) => {
+                    Err(ServerError::Response(error))
+                }
                 Ok(Ok(res)) => Ok(res),
                 Ok(Err(e)) => Err(e),
                 Err(_e) => Err(ServerError::Unknown),
             };
 
             match r {
-                Ok(r) => {
+                Ok((vnode_id, r)) => {
                     results
                         .entry(r.clone())
-                        .and_modify(|i| *i += 1)
-                        .or_insert(1);
+                        .and_modify(|(i, vnodes)| {
+                            *i += 1;
+                            vnodes.push(vnode_id.clone());
+                        })
+                        .or_insert((1, vec![vnode_id]));
 
-                    if results[&r] >= CONSISTENCY_LEVEL {
-                        let response = match r {
+                    if results[&r].0 >= CONSISTENCY_LEVEL {
+                        let response = match &r {
                             ServerResponse::Ok { .. } => ClientResponse::Ok(client_request_id),
                             ServerResponse::Error { .. } => unreachable!(),
                             ServerResponse::Result { result, .. } => ClientResponse::Result {
-                                result,
+                                result: result.clone(),
                                 request_id: client_request_id,
                             },
                         };
@@ -154,8 +159,33 @@ impl ClientServer {
                         event!(
                             Level::INFO,
                             "Results matched with {} request(s)",
-                            results.len()
+                            results[&r].0
                         );
+
+                        if let ServerResponse::Result {
+                            request_id: _,
+                            data_id: Some(data_id),
+                            result: Some(data),
+                        } = &r
+                        {
+                            results.remove(&r);
+                            let repair_request = ServerRequest::Put {
+                                request_id: *data_id,
+                                key: req_key,
+                                value: data.to_string(),
+                            };
+
+                            let bad_nodes: Vec<VNodeId> = results
+                                .into_iter()
+                                .flat_map(|(_, (_, vnode_id))| vnode_id)
+                                .collect();
+
+                            for (vnode_id, mut connection) in replicas {
+                                if bad_nodes.contains(&vnode_id) {
+                                    connection.request(repair_request.clone()).await?;
+                                }
+                            }
+                        }
 
                         break;
                     }
@@ -208,7 +238,6 @@ impl ClientServer {
     async fn handle_stream(
         stream: BidirectionalStream,
         clients: Arc<Mutex<MessageClients>>,
-        storage: db::Database,
         hlc: Arc<Mutex<uhlc::HLC>>,
     ) {
         let (receive_stream, mut send_stream) = stream.split();
@@ -227,41 +256,30 @@ impl ClientServer {
         });
 
         while let Some(Ok((req, _data))) = request_stream.next().await {
-            let storage = storage.clone();
             let clients = clients.clone();
             let send_tx = send_tx.clone();
             let hlc = hlc.clone();
-            tokio::spawn(
-                async move { Self::handle_request(req, clients, storage, hlc, send_tx).await },
-            );
+            tokio::spawn(async move { Self::handle_request(req, clients, hlc, send_tx).await });
         }
     }
 
     async fn handle_connection(
         mut connection: connection::Connection,
         clients: Arc<Mutex<MessageClients>>,
-        storage: db::Database,
         hlc: Arc<Mutex<uhlc::HLC>>,
     ) {
         while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
-            tokio::spawn(Self::handle_stream(
-                stream,
-                clients.clone(),
-                storage.clone(),
-                hlc.clone(),
-            ));
+            tokio::spawn(Self::handle_stream(stream, clients.clone(), hlc.clone()));
         }
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), ServerError> {
-        let storage = self.storage.clone();
         let hlc = self.hlc.clone();
 
         while let Some(connection) = self.server.accept().await {
             tokio::spawn(Self::handle_connection(
                 connection,
                 self.clients.clone(),
-                storage.clone(),
                 hlc.clone(),
             ));
         }
