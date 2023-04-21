@@ -13,6 +13,7 @@ use tokio::{
 };
 use uuid::Uuid;
 use vnode::VNodeId;
+use clap::Parser;
 
 use crate::protocol::{ServerRequest, ServerResponse};
 use crate::vnode::VNode;
@@ -39,11 +40,19 @@ pub enum ServerError {
     Response(String),
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    data_path: Option<std::path::PathBuf>
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // let subscriber = tracing_subscriber::FmtSubscriber::new();
     // tracing::subscriber::set_global_default(subscriber)?;
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+
+    let args = Args::parse();
 
     let local_ip = match local_ip_address::local_ip()? {
         std::net::IpAddr::V4(ip) => ip,
@@ -80,6 +89,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let vnode_id = core_to_vnode_id.remove(&id.id).unwrap();
             let VNodeId { node_id, core_id } = vnode_id;
             let core_to_cmc = core_to_cmc.clone();
+            let data_path = args.data_path.clone();
 
             thread::spawn(move || {
                 // Pin this thread to a single CPU core.
@@ -93,7 +103,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     log::info!("Starting Thread: #{:?}", id);
 
                     rt.block_on(async {
-                        let mut vnode = VNode::new(node_id, core_id, local_ip, rx, core_to_cmc)?;
+                        let mut vnode = VNode::new(node_id, core_id, local_ip, rx, core_to_cmc, data_path)?;
 
                         let _ = vnode.s2s_server.mdns.spawn().await;
                         vnode.run().await?;
