@@ -1288,6 +1288,7 @@ dependencies = [
  "quic-transport",
  "rand 0.8.5",
  "s2n-quic",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",

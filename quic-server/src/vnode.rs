@@ -46,20 +46,11 @@ impl VNode {
         local_ip: Ipv4Addr,
         rx: mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>,
         vnode_to_cmc: HashMap<VNodeId, ChannelMessageClient<ServerRequest, ServerResponse>>,
-        base_path: Option<std::path::PathBuf>
+        data_path: std::path::PathBuf,
     ) -> Result<Self, ServerError> {
         let vnode_id = VNodeId::new(node_id, core_id);
         let client = DistKVClient::new().unwrap();
-
-        let storage = match base_path {
-            None => db::Database::new_tmp(),
-            Some(path) => {
-                let mut p = path.clone();
-                p.push(node_id.to_string());
-                p.push(core_id.to_string());
-                db::Database::new(&p)
-            }
-        };
+        let storage = db::Database::new(&data_path);
 
         let mut connections =
             message_clients::MessageClients::new(client, vnode_id, storage.clone());

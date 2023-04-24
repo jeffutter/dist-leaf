@@ -30,6 +30,7 @@ itertools = "0.10"
 async-trait = "0.1"
 uhlc = "0.5"
 clap = { version = "4.2", features = ["derive"] }
+tempfile = "3.4.0"
 
 [build-dependencies]
 capnpc = "0.16"

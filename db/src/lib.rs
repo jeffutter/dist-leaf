@@ -66,6 +66,23 @@ impl Database {
     }
 
     #[instrument]
+    pub fn list(
+        &self,
+        prefix: &str,
+    ) -> Box<dyn Iterator<Item = Result<(String, DBValue), DatabaseError>> + '_> {
+        let res = self.db.prefix_iterator(prefix).map(|e| {
+            e.map(|(k, v)| {
+                let decoded: DBValue = bincode::deserialize(&v).unwrap();
+                let key = String::from_utf8(k.to_vec()).unwrap();
+                (key, decoded)
+            })
+            .map_err(|e| e.into())
+        });
+
+        Box::new(res)
+    }
+
+    #[instrument]
     pub fn delete(&self, key: &str) -> Result<(), DatabaseError> {
         self.db.delete(key.as_bytes())?;
         Ok(())
