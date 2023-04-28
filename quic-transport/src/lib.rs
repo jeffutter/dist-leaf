@@ -5,12 +5,11 @@ use s2n_quic::{connection::Handle, stream::ReceiveStream};
 use std::{
     convert::From,
     fmt::Debug,
-    marker::{PhantomData, Send},
+    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
 use tracing::instrument;
 
 #[derive(Error, Debug)]
@@ -168,8 +167,8 @@ impl<'a, D> From<ReceiveStream> for MessageStream<'a, D> {
     }
 }
 
-#[async_trait]
-pub trait MessageClient<Req, Res>: Send + Sync + Debug {
+#[async_trait(?Send)]
+pub trait MessageClient<Req, Res>: Debug {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError>;
     fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>>;
 }
@@ -183,7 +182,7 @@ pub struct QuicMessageClient<Req, Res> {
 impl<Req, Res> QuicMessageClient<Req, Res>
 where
     Req: Encode + Decode + Debug,
-    Res: Encode + Decode + Debug + Sync + Send + 'static,
+    Res: Encode + Decode + Debug + 'static,
 {
     pub async fn new(connection: Handle) -> Result<Self, TransportError> {
         Ok(Self {
@@ -194,11 +193,11 @@ where
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<Req, Res> MessageClient<Req, Res> for QuicMessageClient<Req, Res>
 where
-    Req: Encode + Decode + Send + Sync + Debug + 'static,
-    Res: Encode + Decode + Send + Sync + Debug + 'static,
+    Req: Encode + Decode + Debug + 'static,
+    Res: Encode + Decode + Debug + 'static,
 {
     #[instrument(skip(self), fields(message_client = "Quic"))]
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
@@ -234,7 +233,7 @@ impl<Req, Res> Debug for QuicMessageClient<Req, Res> {
 }
 
 pub struct ChannelMessageClient<Req, Res> {
-    server: mpsc::Sender<(Req, oneshot::Sender<Res>)>,
+    server: std::sync::mpsc::Sender<(Req, std::sync::mpsc::Sender<Res>)>,
 }
 
 impl<Req, Res> Clone for ChannelMessageClient<Req, Res> {
@@ -250,25 +249,22 @@ where
     Req: Debug,
     Res: Debug,
 {
-    pub fn new(server: mpsc::Sender<(Req, oneshot::Sender<Res>)>) -> Self {
+    pub fn new(server: std::sync::mpsc::Sender<(Req, std::sync::mpsc::Sender<Res>)>) -> Self {
         Self { server }
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<Req, Res> MessageClient<Req, Res> for ChannelMessageClient<Req, Res>
 where
-    Req: Debug + Send + 'static,
-    Res: Debug + Send + 'static,
+    Req: Debug + 'static,
+    Res: Debug + 'static,
 {
     #[instrument(skip(self), fields(message_client = "Channel"))]
     async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
-        let (tx, rx) = oneshot::channel();
-        self.server
-            .send((req, tx))
-            .await
-            .expect("channel should be open");
-        let result = rx.await.expect("channel should be open");
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.server.send((req, tx)).expect("channel should be open");
+        let result = rx.recv().expect("channel should be open");
 
         Ok(result)
     }

@@ -8,10 +8,6 @@ use env_logger::Env;
 use quic_transport::{ChannelMessageClient, TransportError};
 use std::{collections::HashMap, error::Error, thread};
 use thiserror::Error;
-use tokio::{
-    runtime,
-    sync::{mpsc, oneshot},
-};
 use uuid::Uuid;
 use vnode::VNodeId;
 
@@ -47,7 +43,7 @@ struct Args {
     data_path: Option<std::path::PathBuf>,
 }
 
-#[tokio::main]
+#[monoio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // let subscriber = tracing_subscriber::FmtSubscriber::new();
     // tracing::subscriber::set_global_default(subscriber)?;
@@ -94,7 +90,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (mut core_to_vnode_id, mut core_to_rx, core_to_cmc): (
         HashMap<usize, VNodeId>,
-        HashMap<usize, mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>>,
+        HashMap<
+            usize,
+            std::sync::mpsc::Receiver<(ServerRequest, std::sync::mpsc::Sender<ServerResponse>)>,
+        >,
         HashMap<VNodeId, ChannelMessageClient<ServerRequest, ServerResponse>>,
     ) = core_ids.iter().fold(
         (HashMap::new(), HashMap::new(), HashMap::new()),
@@ -119,7 +118,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 _ => unimplemented!(),
             };
             let vnode_id = VNodeId::new(node_id, core_id);
-            let (tx, rx) = mpsc::channel::<(ServerRequest, oneshot::Sender<ServerResponse>)>(1);
+            let (tx, rx) = std::sync::mpsc::channel::<(
+                ServerRequest,
+                std::sync::mpsc::Sender<ServerResponse>,
+            )>();
             let channel_message_client = ChannelMessageClient::new(tx);
             core_to_vnode_id.insert(id, vnode_id.clone());
             rx_acc.insert(id, rx);
@@ -137,21 +139,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let core_to_cmc = core_to_cmc.clone();
 
             let mut data_path = base_path.clone();
-            // data_path.push(core_id.to_string());
             data_path.push(id.id.to_string());
 
             thread::spawn(move || {
                 // Pin this thread to a single CPU core.
                 let res = core_affinity::set_for_current(id);
                 if res {
-                    let rt = runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap();
-
                     log::info!("Starting Thread: #{:?}", id);
 
-                    rt.block_on(async {
+                    monoio::start::<monoio::IoUringDriver, _>(async {
                         let mut vnode =
                             VNode::new(node_id, core_id, local_ip, rx, core_to_cmc, data_path)?;
 

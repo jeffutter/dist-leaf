@@ -16,7 +16,7 @@ pub mod client_capnp {
     include!(concat!(env!("OUT_DIR"), "/client_capnp.rs"));
 }
 
-#[tokio::main]
+#[monoio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // tracing_subscriber::fmt::init();
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    tokio::spawn(async move {
+    monoio::spawn(async move {
         loop {
             if let Some(req) = rx.recv().await {
                 let response: ClientResponse = stream.request(req).await.unwrap().into();

@@ -7,8 +7,10 @@ edition = "2021"
 
 [dependencies]
 s2n-quic = "1"
-tokio = { version = "1.26.0", features = ["full"] }
-tokio-util = { version = "0.7", features = ["io"] }
+s2n-quic-core = "0.19"
+s2n-quic-platform = "0.20"
+monoio = "0.1.2"
+local-sync = "0.1.0"
 mdns-sd = "0.7.1"
 bytes = "1"
 local-ip-address = "0.5.1"

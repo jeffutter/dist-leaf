@@ -106,6 +106,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "auto-const-array"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "336c4771be12bbacae182a5ad2a788bfa27d2c21c5837731480ab5cf161c0e04"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -127,12 +138,13 @@ dependencies = [
  "fake",
  "futures",
  "itertools",
+ "local-sync",
  "log",
+ "monoio",
  "num_cpus",
  "quic-client",
  "quic-transport",
  "rand 0.8.5",
- "tokio",
  "uhlc",
 ]
 
@@ -464,7 +476,7 @@ dependencies = [
  "autocfg",
  "cfg-if",
  "crossbeam-utils",
- "memoffset",
+ "memoffset 0.8.0",
  "scopeguard",
 ]
 
@@ -530,6 +542,17 @@ dependencies = [
  "errno-dragonfly",
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "errno"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bcfec3a70f97c962c307b2d2c56e358cf1d00b558d74262b5f929ee8cc7e73a"
+dependencies = [
+ "errno-dragonfly",
+ "libc",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -668,6 +691,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fxhash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -759,6 +791,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ebdb29d2ea9ed0083cd8cece49bbd968021bd99b0849edb4a9a7ee0fdf6a4e0"
 
 [[package]]
+name = "hex-literal"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
+
+[[package]]
 name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -799,7 +837,7 @@ version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f4f90afb01281fdeffb0f8e082d230cbe4f888f837cc90759696b858db1a700"
 dependencies = [
- "memoffset",
+ "memoffset 0.8.0",
 ]
 
 [[package]]
@@ -811,6 +849,16 @@ dependencies = [
  "hermit-abi 0.3.1",
  "libc",
  "windows-sys 0.45.0",
+]
+
+[[package]]
+name = "io-uring"
+version = "0.5.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd1e1a01cfb924fd8c5c43b6827965db394f5a3a16c599ce03452266e1cf984c"
+dependencies = [
+ "bitflags",
+ "libc",
 ]
 
 [[package]]
@@ -872,9 +920,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.140"
+version = "0.2.142"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99227334921fae1a979cf0bfdfcc6b3e5ce376ef57e16fb6fb3ea2ed6095f80c"
+checksum = "6a987beff54b60ffa6d51982e1aa1146bc42f19bd26be28b0586f252fccf5317"
 
 [[package]]
 name = "libloading"
@@ -938,6 +986,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "local-sync"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5271fc029f75f74ab28194c9bd8580a1b953a8c3896e70b2a61b8dceb3667e79"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -976,7 +1035,7 @@ dependencies = [
  "if-addrs",
  "log",
  "polling",
- "socket2",
+ "socket2 0.4.9",
 ]
 
 [[package]]
@@ -984,6 +1043,15 @@ name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
+
+[[package]]
+name = "memoffset"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
+dependencies = [
+ "autocfg",
+]
 
 [[package]]
 name = "memoffset"
@@ -1013,6 +1081,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "monoio"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "762fe3b52f2193a2b28ac992576f60b282b63e2fe80549f906e8d2f4a48e1c81"
+dependencies = [
+ "auto-const-array",
+ "bytes",
+ "fxhash",
+ "io-uring",
+ "libc",
+ "mio",
+ "monoio-macros",
+ "nix",
+ "pin-project-lite",
+ "socket2 0.5.2",
+]
+
+[[package]]
+name = "monoio-macros"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c85c9d2114c190b1ec18da29bfbe399a95d81657633b0d2333d4084515aa9f95"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "neli"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1020,6 +1117,20 @@ checksum = "9053554eb5dcb7e10d9cdab1206965bde870eed5d0d341532ca035e3ba221508"
 dependencies = [
  "byteorder",
  "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f346ff70e7dbfd675fe90590b92d59ef2de15a8779ae305ebcbfd3f0caf59be4"
+dependencies = [
+ "autocfg",
+ "bitflags",
+ "cfg-if",
+ "libc",
+ "memoffset 0.6.5",
+ "pin-utils",
 ]
 
 [[package]]
@@ -1119,29 +1230,6 @@ name = "overload"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
-
-[[package]]
-name = "parking_lot"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3742b2c103b9f06bc9fff0a37ff4912935851bee6d36f3c02bcc755bcfec228f"
-dependencies = [
- "lock_api",
- "parking_lot_core",
-]
-
-[[package]]
-name = "parking_lot_core"
-version = "0.9.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9069cbb9f99e3a5083476ccb29ceb1de18b9118cafa53e90c9551235de2b9521"
-dependencies = [
- "cfg-if",
- "libc",
- "redox_syscall",
- "smallvec",
- "windows-sys 0.45.0",
-]
 
 [[package]]
 name = "peeking_take_while"
@@ -1255,12 +1343,13 @@ dependencies = [
  "capnpc",
  "env_logger",
  "futures",
+ "local-sync",
  "log",
  "mdns-sd",
+ "monoio",
  "quic-transport",
  "s2n-quic",
  "thiserror",
- "tokio",
  "tracing",
  "tracing-subscriber",
  "uhlc",
@@ -1282,16 +1371,18 @@ dependencies = [
  "futures",
  "itertools",
  "local-ip-address",
+ "local-sync",
  "log",
  "mdns-sd",
+ "monoio",
  "quic-client",
  "quic-transport",
  "rand 0.8.5",
  "s2n-quic",
+ "s2n-quic-core 0.19.0",
+ "s2n-quic-platform 0.20.0",
  "tempfile",
  "thiserror",
- "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uhlc",
@@ -1305,10 +1396,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "local-sync",
  "log",
+ "monoio",
  "s2n-quic",
  "thiserror",
- "tokio",
  "tracing",
  "uhlc",
 ]
@@ -1479,7 +1571,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db4165c9963ab29e422d6c26fbc1d37f15bace6b2810221f9d925023480fcf0e"
 dependencies = [
  "bitflags",
- "errno",
+ "errno 0.2.8",
  "io-lifetimes",
  "libc",
  "linux-raw-sys",
@@ -1526,6 +1618,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "s2n-codec"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfdf36bef36330d57b1dc10fecb04788612aecef9f864469771f186050267519"
+dependencies = [
+ "byteorder",
+ "zerocopy",
+ "zerocopy-derive",
+]
+
+[[package]]
 name = "s2n-quic"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1539,9 +1642,9 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "ring",
- "s2n-codec",
- "s2n-quic-core",
- "s2n-quic-platform",
+ "s2n-codec 0.3.0",
+ "s2n-quic-core 0.17.0",
+ "s2n-quic-platform 0.17.0",
  "s2n-quic-tls-default",
  "s2n-quic-transport",
  "tokio",
@@ -1560,11 +1663,31 @@ dependencies = [
  "byteorder",
  "bytes",
  "cache-padded",
- "hex-literal",
+ "hex-literal 0.3.4",
  "num-rational",
  "num-traits",
  "once_cell",
- "s2n-codec",
+ "s2n-codec 0.3.0",
+ "subtle",
+ "zerocopy",
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "s2n-quic-core"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71f8d75057b4a6c098967c342e54e852d0b95ed47ba088e4ab13a78f87a16199"
+dependencies = [
+ "atomic-waker",
+ "byteorder",
+ "bytes",
+ "cache-padded",
+ "hex-literal 0.4.1",
+ "num-rational",
+ "num-traits",
+ "once_cell",
+ "s2n-codec 0.5.0",
  "subtle",
  "zerocopy",
  "zerocopy-derive",
@@ -1579,8 +1702,8 @@ dependencies = [
  "cfg-if",
  "lazy_static",
  "ring",
- "s2n-codec",
- "s2n-quic-core",
+ "s2n-codec 0.3.0",
+ "s2n-quic-core 0.17.0",
  "zeroize",
 ]
 
@@ -1591,13 +1714,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a65e5a9ddf732e2070231fbf35e267e0e2028f603924d617fd4987bf9450224"
 dependencies = [
  "cfg-if",
- "errno",
+ "errno 0.2.8",
  "futures",
  "lazy_static",
  "libc",
  "pin-project",
- "s2n-quic-core",
- "socket2",
+ "s2n-quic-core 0.17.0",
+ "socket2 0.4.9",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "s2n-quic-platform"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cbdf80db6e6884bd43aeed509f5c5caf8fd46d70d34e5dfc103d800894afa9c"
+dependencies = [
+ "cfg-if",
+ "errno 0.3.1",
+ "futures",
+ "lazy_static",
+ "libc",
+ "pin-project",
+ "s2n-quic-core 0.19.0",
+ "socket2 0.5.2",
  "tokio",
  "zeroize",
 ]
@@ -1611,8 +1752,8 @@ dependencies = [
  "bytes",
  "rustls",
  "rustls-pemfile",
- "s2n-codec",
- "s2n-quic-core",
+ "s2n-codec 0.3.0",
+ "s2n-quic-core 0.17.0",
  "s2n-quic-crypto",
 ]
 
@@ -1623,10 +1764,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00f0fc77245ed8d497b7df71f9214c4c3a65524ac4bc1edc5552f2471c5ecbde"
 dependencies = [
  "bytes",
- "errno",
+ "errno 0.2.8",
  "libc",
- "s2n-codec",
- "s2n-quic-core",
+ "s2n-codec 0.3.0",
+ "s2n-quic-core 0.17.0",
  "s2n-quic-crypto",
  "s2n-tls",
 ]
@@ -1653,8 +1794,8 @@ dependencies = [
  "hashbrown",
  "intrusive-collections",
  "once_cell",
- "s2n-codec",
- "s2n-quic-core",
+ "s2n-codec 0.3.0",
+ "s2n-quic-core 0.17.0",
  "siphasher",
  "smallvec",
 ]
@@ -1665,7 +1806,7 @@ version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d31af56f695ed3d655cd5e1d0c99125b3b216f2f997f5fd7ecc797499b0de87"
 dependencies = [
- "errno",
+ "errno 0.2.8",
  "libc",
  "pin-project-lite",
  "s2n-tls-sys",
@@ -1755,15 +1896,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43b2853a4d09f215c24cc5489c992ce46052d359b5109343cbafbf26bc62f8a3"
 
 [[package]]
-name = "signal-hook-registry"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8229b473baa5980ac72ef434c4415e70c4b5e71b423043adb4ba059f89c99a1"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "siphasher"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1792,6 +1924,16 @@ checksum = "64a4a911eed85daf18834cfaa86a79b7d266ff93ff5ba14005426219480ed662"
 dependencies = [
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "socket2"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d283f86695ae989d1e18440a943880967156325ba025f05049946bff47bcc2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -1930,15 +2072,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03201d01c3c27a29c8a5cee5b55a93ddae1ccf6f08f65365c2c918f8c1b76f64"
 dependencies = [
  "autocfg",
- "bytes",
  "libc",
- "memchr",
  "mio",
- "num_cpus",
- "parking_lot",
  "pin-project-lite",
- "signal-hook-registry",
- "socket2",
+ "socket2 0.4.9",
  "tokio-macros",
  "windows-sys 0.45.0",
 ]
@@ -1952,19 +2089,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "tokio-util"
-version = "0.7.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5427d89453009325de0d8f342c9490009f76e999cb7672d77e46267448f7e6b2"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-sink",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]

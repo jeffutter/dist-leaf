@@ -4,8 +4,9 @@ use std::{
     time::Duration,
 };
 
+use futures::lock::Mutex;
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
-use tokio::{sync::Mutex, task, time};
+use monoio::{task, time};
 use uuid::Uuid;
 
 use crate::{message_clients::MessageClients, ServerError, VNodeId};
@@ -61,7 +62,7 @@ impl S2SMDNS {
         let local_socket_addr = self.local_socket_addr.clone();
         let clients = self.clients.clone();
 
-        task::spawn(async move {
+        monoio::spawn(async move {
             loop {
                 interval.tick().await;
                 while let Ok(event) = receiver.recv_async().await {

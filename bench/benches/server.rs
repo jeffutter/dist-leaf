@@ -6,12 +6,12 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use env_logger::Env;
 use futures::Future;
 use itertools::Itertools;
+use monoio::runtime;
 use quic_client::{
     protocol::{ClientRequest, ClientResponse},
     ClientError, DistKVClient,
 };
 use quic_transport::{MessageClient, QuicMessageClient};
-use tokio::runtime;
 
 async fn put(
     kvs: &Vec<(&String, &String, uhlc::Timestamp)>,

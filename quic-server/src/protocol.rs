@@ -1,10 +1,9 @@
 use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
+use local_sync::oneshot;
 use quic_transport::{Decode, Encode, TransportError};
 use std::io::Write;
 use thiserror::Error;
-use tokio::io;
-use tokio::sync::oneshot;
 use tracing::instrument;
 
 use crate::server_capnp;
@@ -12,7 +11,7 @@ use crate::server_capnp;
 #[derive(Error, Debug)]
 pub enum KVServerError {
     #[error("data store disconnected")]
-    Disconnect(#[from] io::Error),
+    Disconnect(#[from] std::io::Error),
     #[error("channel error")]
     ChannelRecv(#[from] oneshot::error::RecvError),
 }

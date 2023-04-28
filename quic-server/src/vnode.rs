@@ -1,5 +1,6 @@
 pub(crate) mod client_mdns;
 mod client_server;
+mod s2n;
 pub(crate) mod s2s_mdns;
 mod s2s_server;
 
@@ -11,14 +12,12 @@ use crate::{
 };
 use async_trait::async_trait;
 use db::DBValue;
+use futures::lock::Mutex;
+use monoio::try_join;
 use quic_client::DistKVClient;
 use quic_transport::{ChannelMessageClient, MessageClient, TransportError};
 use std::fmt::Debug;
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
-use tokio::{
-    sync::{mpsc, oneshot, Mutex},
-    try_join,
-};
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -44,7 +43,7 @@ impl VNode {
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        rx: mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>,
+        rx: std::sync::mpsc::Receiver<(ServerRequest, std::sync::mpsc::Sender<ServerResponse>)>,
         vnode_to_cmc: HashMap<VNodeId, ChannelMessageClient<ServerRequest, ServerResponse>>,
         data_path: std::path::PathBuf,
     ) -> Result<Self, ServerError> {
@@ -93,7 +92,7 @@ impl LocalMessageClient {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl MessageClient<ServerRequest, ServerResponse> for LocalMessageClient {
     #[instrument(skip(self), fields(message_client = "Local"))]
     async fn request(&mut self, req: ServerRequest) -> Result<ServerResponse, TransportError> {

@@ -5,15 +5,14 @@ use crate::{
     ServerError,
 };
 use bytes::Bytes;
+use futures::lock::Mutex;
 use futures::StreamExt;
+use local_sync::mpsc;
+use monoio::{select, task::JoinHandle};
 use quic_client::protocol::{ClientRequest, ClientResponse};
 use quic_transport::{DataStream, Encode, MessageStream};
 use s2n_quic::{connection, stream::BidirectionalStream, Server};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
-use tokio::{
-    sync::{mpsc, Mutex},
-    task::JoinSet,
-};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
@@ -70,9 +69,12 @@ impl ClientServer {
         req: ClientRequest,
         clients: Arc<Mutex<MessageClients>>,
         hlc: Arc<Mutex<uhlc::HLC>>,
-        send_tx: mpsc::Sender<Bytes>,
+        send_tx: mpsc::bounded::Tx<Bytes>,
     ) -> Result<(), ServerError> {
-        let mut join_set: JoinSet<Result<(VNodeId, ServerResponse), ServerError>> = JoinSet::new();
+        // let mut join_set: JoinSet<Result<(VNodeId, ServerResponse), ServerError>> = JoinSet::new();
+        let (result_tx, mut result_rx) = mpsc::bounded::channel::<
+            Result<(VNodeId, ServerResponse), ServerError>,
+        >(REPLICATION_FACTOR);
         let req_key = req.key().clone();
         let mut cs = clients.lock().await;
         let replicas = cs.replicas(&req_key, REPLICATION_FACTOR).await;
@@ -81,10 +83,10 @@ impl ClientServer {
 
         let local_request_id = hlc.lock().await.new_timestamp();
         let client_request_id = req.request_id().clone();
-        let is_put = match req {
-            ClientRequest::Put { .. } => true,
-            _ => false,
-        };
+        // let is_put = match req {
+        //     ClientRequest::Put { .. } => true,
+        //     _ => false,
+        // };
 
         let server_request = match req {
             ClientRequest::Get { key, .. } => ServerRequest::Get {
@@ -98,117 +100,127 @@ impl ClientServer {
             },
         };
 
-        for (vnode_id, connection) in replicas.iter() {
-            let vnode_id = vnode_id.clone();
-            let mut connection = connection.box_clone();
+        let _requests: Vec<JoinHandle<()>> = replicas
+            .iter()
+            .map(|(vnode_id, connection)| {
+                let vnode_id = vnode_id.clone();
+                let mut connection = connection.box_clone();
+                let server_request = server_request.clone();
+                let result_tx = result_tx.clone();
 
-            let server_request = server_request.clone();
+                monoio::spawn({
+                    async move {
+                        let res = connection
+                            .request(server_request)
+                            .await
+                            .map(|x| (vnode_id, x))
+                            .map_err(|e| e.into());
 
-            join_set.spawn({
-                async move {
-                    let res = connection.request(server_request).await?;
-
-                    Ok::<_, ServerError>((vnode_id, res))
-                }
-            });
-        }
+                        result_tx.send(res).await.unwrap();
+                    }
+                })
+            })
+            .collect();
 
         let mut results: HashMap<ServerResponse, (usize, Vec<VNodeId>)> = HashMap::new();
         let mut received_responses = 0;
         let mut result_sent = false;
 
-        while let Some(res) = join_set.join_next().await {
-            received_responses += 1;
+        while received_responses < REPLICATION_FACTOR {
+            select! {
+                Some(res) = result_rx.recv() => {
+                    received_responses += 1;
 
-            let r = match res {
-                Ok(Ok((_, ServerResponse::Error { error, .. }))) => {
-                    Err(ServerError::Response(error))
-                }
-                Ok(Ok(res)) => Ok(res),
-                Ok(Err(e)) => Err(e),
-                Err(_e) => Err(ServerError::Unknown),
-            };
+                    let r = match res {
+                        Ok((_, ServerResponse::Error { error, .. })) => {
+                            Err(ServerError::Response(error))
+                        }
+                        Ok(res) => Ok(res),
+                        Err(_e) => Err(ServerError::Unknown),
+                    };
 
-            match r {
-                Ok((vnode_id, r)) => {
-                    results
-                        .entry(r.clone())
-                        .and_modify(|(i, vnodes)| {
-                            *i += 1;
-                            vnodes.push(vnode_id.clone());
-                        })
-                        .or_insert((1, vec![vnode_id]));
+                    match r {
+                        Ok((vnode_id, r)) => {
+                            results
+                                .entry(r.clone())
+                                .and_modify(|(i, vnodes)| {
+                                    *i += 1;
+                                    vnodes.push(vnode_id.clone());
+                                })
+                                .or_insert((1, vec![vnode_id]));
 
-                    if results[&r].0 >= CONSISTENCY_LEVEL {
-                        let response = match &r {
-                            ServerResponse::Ok { .. } => ClientResponse::Ok(client_request_id),
-                            ServerResponse::Error { .. } => unreachable!(),
-                            ServerResponse::Result { result, .. } => ClientResponse::Result {
-                                result: result.clone(),
-                                request_id: client_request_id,
-                            },
-                        };
+                            if results[&r].0 >= CONSISTENCY_LEVEL {
+                                let response = match &r {
+                                    ServerResponse::Ok { .. } => ClientResponse::Ok(client_request_id),
+                                    ServerResponse::Error { .. } => unreachable!(),
+                                    ServerResponse::Result { result, .. } => ClientResponse::Result {
+                                        result: result.clone(),
+                                        request_id: client_request_id,
+                                    },
+                                };
 
-                        send_tx
-                            .send(response.encode())
-                            .await
-                            .expect("channel sould be open");
+                                send_tx
+                                    .send(response.encode())
+                                    .await
+                                    .expect("channel sould be open");
 
-                        result_sent = true;
+                                result_sent = true;
 
-                        event!(
-                            Level::INFO,
-                            "Results matched with {} request(s)",
-                            results[&r].0
-                        );
+                                event!(
+                                    Level::INFO,
+                                    "Results matched with {} request(s)",
+                                    results[&r].0
+                                );
 
-                        if let ServerResponse::Result {
-                            request_id: _,
-                            data_id: Some(data_id),
-                            result: Some(data),
-                        } = &r
-                        {
-                            results.remove(&r);
-                            let repair_request = ServerRequest::Put {
-                                request_id: *data_id,
-                                key: req_key,
-                                value: data.to_string(),
-                            };
+                                if let ServerResponse::Result {
+                                    request_id: _,
+                                    data_id: Some(data_id),
+                                    result: Some(data),
+                                } = &r
+                                {
+                                    results.remove(&r);
+                                    let repair_request = ServerRequest::Put {
+                                        request_id: *data_id,
+                                        key: req_key,
+                                        value: data.to_string(),
+                                    };
 
-                            let bad_nodes: Vec<VNodeId> = results
-                                .into_iter()
-                                .flat_map(|(_, (_, vnode_id))| vnode_id)
-                                .collect();
+                                    let bad_nodes: Vec<VNodeId> = results
+                                        .into_iter()
+                                        .flat_map(|(_, (_, vnode_id))| vnode_id)
+                                        .collect();
 
-                            for (vnode_id, mut connection) in replicas {
-                                if bad_nodes.contains(&vnode_id) {
-                                    connection.request(repair_request.clone()).await?;
+                                    for (vnode_id, mut connection) in replicas {
+                                        if bad_nodes.contains(&vnode_id) {
+                                            connection.request(repair_request.clone()).await?;
+                                        }
+                                    }
                                 }
+
+                                break;
+                            }
+
+                            if received_responses >= REPLICATION_FACTOR {
+                                let res = ClientResponse::Error {
+                                    request_id: client_request_id,
+                                    error: "Results did not match".to_string(),
+                                };
+
+                                send_tx
+                                    .send(res.encode())
+                                    .await
+                                    .expect("channel should be open");
+                                result_sent = true;
+
+                                event!(Level::ERROR, results = ?results, "Results did not match");
+
+                                break;
                             }
                         }
-
-                        break;
+                        Err(e) => {
+                            event!(Level::ERROR, error = ?e, "Error fetching from another server");
+                        }
                     }
-
-                    if received_responses >= REPLICATION_FACTOR {
-                        let res = ClientResponse::Error {
-                            request_id: client_request_id,
-                            error: "Results did not match".to_string(),
-                        };
-
-                        send_tx
-                            .send(res.encode())
-                            .await
-                            .expect("channel should be open");
-                        result_sent = true;
-
-                        event!(Level::ERROR, results = ?results, "Results did not match");
-
-                        break;
-                    }
-                }
-                Err(e) => {
-                    event!(Level::ERROR, error = ?e, "Error fetching from another server");
                 }
             }
         }
@@ -227,10 +239,10 @@ impl ClientServer {
 
         // For put requests, we want to let all of the writes finish, even if we've hit the
         // requested Consistency Level
-        // if let ClientRequest::Put { .. } = req {
-        if is_put {
-            join_set.detach_all();
-        }
+        // TODO: Need to reimplement this, I think drop kills the JoinHandle in monoio
+        // if is_put {
+        //     join_set.detach_all();
+        // }
 
         Ok::<(), ServerError>(())
     }
@@ -244,10 +256,10 @@ impl ClientServer {
         let data_stream = DataStream::new(receive_stream);
         let mut request_stream: MessageStream<ClientRequest> = MessageStream::new(data_stream);
 
-        let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
-            mpsc::channel(100);
+        let (send_tx, mut send_rx): (mpsc::bounded::Tx<Bytes>, mpsc::bounded::Rx<Bytes>) =
+            mpsc::bounded::channel(100);
 
-        tokio::spawn(async move {
+        monoio::spawn(async move {
             while let Some(data) = send_rx.recv().await {
                 send_stream.send(data).await?;
             }
@@ -259,7 +271,7 @@ impl ClientServer {
             let clients = clients.clone();
             let send_tx = send_tx.clone();
             let hlc = hlc.clone();
-            tokio::spawn(async move { Self::handle_request(req, clients, hlc, send_tx).await });
+            monoio::spawn(async move { Self::handle_request(req, clients, hlc, send_tx).await });
         }
     }
 
@@ -269,7 +281,7 @@ impl ClientServer {
         hlc: Arc<Mutex<uhlc::HLC>>,
     ) {
         while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
-            tokio::spawn(Self::handle_stream(stream, clients.clone(), hlc.clone()));
+            monoio::spawn(Self::handle_stream(stream, clients.clone(), hlc.clone()));
         }
     }
 
@@ -277,7 +289,7 @@ impl ClientServer {
         let hlc = self.hlc.clone();
 
         while let Some(connection) = self.server.accept().await {
-            tokio::spawn(Self::handle_connection(
+            monoio::spawn(Self::handle_connection(
                 connection,
                 self.clients.clone(),
                 hlc.clone(),

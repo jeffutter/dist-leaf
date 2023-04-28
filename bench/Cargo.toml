@@ -13,7 +13,8 @@ itertools = "0.10.5"
 
 [dependencies]
 quic-client = { path = "../quic-client" }
-tokio = { version = "1.26.0", features = ["macros", "rt"] }
+monoio = "0.1.2"
+local-sync = "0.1.0"
 futures = "0.3.26"
 env_logger = "0.10.0"
 num_cpus = "1"
