@@ -3,8 +3,7 @@ mod protocol;
 
 use env_logger::Env;
 use protocol::{ClientRequest, ClientResponse};
-use quic_client::DistKVClient;
-use quic_transport::MessageClient;
+use quic_transport::{quic::Client, MessageClient};
 use std::{
     error::Error,
     sync::{Arc, Mutex},
@@ -31,7 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let hlc = Arc::new(Mutex::new(uhlc::HLC::default()));
     println!("Client Found: {:?}", addr);
 
-    let client: DistKVClient<ClientRequest, ClientResponse> = DistKVClient::new()?;
+    let client: Client<ClientRequest, ClientResponse> = Client::new()?;
     let connection = client.connect(*addr).await?;
     let mut stream = connection.stream().await?;
 

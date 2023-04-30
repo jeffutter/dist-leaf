@@ -7,12 +7,13 @@ use crate::{
     message_clients,
     protocol::{ServerRequest, ServerResponse},
     vnode::{client_server::ClientServer, s2s_server::S2SServer},
-    ServerError,
 };
 use async_trait::async_trait;
 use db::DBValue;
-use quic_client::DistKVClient;
-use quic_transport::{ChannelMessageClient, MessageClient, TransportError};
+use quic_transport::{
+    quic::{Client, ServerError},
+    ChannelMessageClient, MessageClient, TransportError,
+};
 use std::fmt::Debug;
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
 use tokio::{
@@ -49,7 +50,7 @@ impl VNode {
         data_path: std::path::PathBuf,
     ) -> Result<Self, ServerError> {
         let vnode_id = VNodeId::new(node_id, core_id);
-        let client = DistKVClient::new().unwrap();
+        let client = Client::new().unwrap();
         let storage = db::Database::new(&data_path);
 
         let mut connections =

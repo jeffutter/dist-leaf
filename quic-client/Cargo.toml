@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 capnp = "0.16"
-s2n-quic = "1"
 tokio = { version = "1.26", features = ["full"] }
 log = "0.4"
 futures = "0.3"

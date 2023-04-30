@@ -3,11 +3,10 @@ mod protocol;
 mod vnode;
 
 use clap::Parser;
-use db::{Database, DatabaseError};
+use db::Database;
 use env_logger::Env;
-use quic_transport::{ChannelMessageClient, TransportError};
+use quic_transport::{quic::ServerError, ChannelMessageClient};
 use std::{collections::HashMap, error::Error, thread};
-use thiserror::Error;
 use tokio::{
     runtime,
     sync::{mpsc, oneshot},
@@ -21,24 +20,6 @@ use tempfile::TempDir;
 
 pub mod server_capnp {
     include!(concat!(env!("OUT_DIR"), "/server_capnp.rs"));
-}
-
-#[derive(Error, Debug)]
-pub enum ServerError {
-    #[error("database error")]
-    Database(#[from] DatabaseError),
-    #[error("transport error")]
-    Decoding(#[from] TransportError),
-    #[error("connection error")]
-    Connection(#[from] s2n_quic::connection::Error),
-    #[error("stream error")]
-    Stream(#[from] s2n_quic::stream::Error),
-    #[error("unknown server error")]
-    Unknown,
-    #[error("initialization error: {}", .0)]
-    Initialization(String),
-    #[error("response error: {}", .0)]
-    Response(String),
 }
 
 #[derive(Parser, Debug)]
@@ -113,7 +94,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             },
                         )
                         .unwrap();
-                    node_id
+                    core_id
                 }
                 Ok(Some(data)) => data.data.parse().unwrap(),
                 _ => unimplemented!(),

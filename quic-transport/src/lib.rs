@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use futures::StreamExt;
-use s2n_quic::{connection::Handle, stream::ReceiveStream};
+use futures::{Stream, StreamExt};
 use std::{
     convert::From,
     fmt::Debug,
@@ -12,6 +11,8 @@ use std::{
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::instrument;
+
+pub mod quic;
 
 #[derive(Error, Debug)]
 pub enum TransportError {
@@ -24,6 +25,18 @@ pub enum TransportError {
     #[error("unknown server error: {}", .0)]
     UnknownMsg(String),
     #[error("unknown server error")]
+    Unknown,
+}
+
+#[derive(Error, Debug)]
+pub enum ClientError {
+    #[error("connection error")]
+    Connection(#[from] s2n_quic::connection::Error),
+    #[error("initialization error: {}", .0)]
+    Initialization(String),
+    #[error("transport error")]
+    Transport(#[from] TransportError),
+    #[error("unknown client error")]
     Unknown,
 }
 
@@ -75,40 +88,49 @@ impl ProtoReader {
     }
 }
 
-pub struct DataStream {
-    stream: ReceiveStream,
+pub struct DataStream<E>
+where
+    E: Into<TransportError>,
+{
+    stream: Box<dyn Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static>,
     proto_reader: ProtoReader,
 }
 
-impl DataStream {
-    pub fn new(stream: ReceiveStream) -> Self {
+impl<E> DataStream<E>
+where
+    TransportError: From<E>,
+{
+    pub fn new(stream: impl Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static) -> Self {
         Self {
-            stream,
+            stream: Box::new(stream),
             proto_reader: ProtoReader::new(),
         }
     }
 }
 
-impl futures::stream::Stream for DataStream {
+impl<E> Stream for DataStream<E>
+where
+    TransportError: From<E>,
+{
     type Item = Result<Bytes, TransportError>;
 
     fn poll_next(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        match futures::ready!(self.stream.poll_receive(cx)) {
-            Ok(Some(data)) => {
+        match futures::ready!(self.stream.poll_next_unpin(cx)) {
+            Some(Ok(data)) => {
                 self.proto_reader.add_data(data);
                 match self.proto_reader.read_message() {
                     Some(bytes) => Poll::Ready(Some(Ok(bytes))),
                     None => self.poll_next(cx),
                 }
             }
-            Ok(None) => Poll::Ready(None),
-            Err(e) => {
+            Some(Err(e)) => {
                 log::warn!("Stream: Error");
                 Poll::Ready(Some(Err(e.into())))
             }
+            None => Poll::Ready(None),
         }
     }
 }
@@ -123,13 +145,19 @@ pub trait Encode {
     fn encode(&self) -> Bytes;
 }
 
-pub struct MessageStream<'a, D> {
-    data_stream: DataStream,
+pub struct MessageStream<'a, D, E>
+where
+    TransportError: From<E>,
+{
+    data_stream: DataStream<E>,
     phantom: PhantomData<&'a D>,
 }
 
-impl<'a, D> MessageStream<'a, D> {
-    pub fn new(data_stream: DataStream) -> Self {
+impl<'a, D, E> MessageStream<'a, D, E>
+where
+    TransportError: From<E>,
+{
+    pub fn new(data_stream: DataStream<E>) -> Self {
         Self {
             data_stream,
             phantom: PhantomData,
@@ -137,9 +165,10 @@ impl<'a, D> MessageStream<'a, D> {
     }
 }
 
-impl<'a, D> futures::stream::Stream for MessageStream<'a, D>
+impl<'a, D, E> Stream for MessageStream<'a, D, E>
 where
     D: Decode,
+    TransportError: From<E>,
 {
     type Item = Result<(D, Bytes), TransportError>;
 
@@ -162,75 +191,10 @@ where
     }
 }
 
-impl<'a, D> From<ReceiveStream> for MessageStream<'a, D> {
-    fn from(stream: ReceiveStream) -> Self {
-        Self::new(DataStream::new(stream))
-    }
-}
-
 #[async_trait]
 pub trait MessageClient<Req, Res>: Send + Sync + Debug {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError>;
     fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>>;
-}
-
-pub struct QuicMessageClient<Req, Res> {
-    handle: Handle,
-    phantom1: PhantomData<Req>,
-    phantom2: PhantomData<Res>,
-}
-
-impl<Req, Res> QuicMessageClient<Req, Res>
-where
-    Req: Encode + Decode + Debug,
-    Res: Encode + Decode + Debug + Sync + Send + 'static,
-{
-    pub async fn new(connection: Handle) -> Result<Self, TransportError> {
-        Ok(Self {
-            handle: connection,
-            phantom1: PhantomData,
-            phantom2: PhantomData,
-        })
-    }
-}
-
-#[async_trait]
-impl<Req, Res> MessageClient<Req, Res> for QuicMessageClient<Req, Res>
-where
-    Req: Encode + Decode + Send + Sync + Debug + 'static,
-    Res: Encode + Decode + Send + Sync + Debug + 'static,
-{
-    #[instrument(skip(self), fields(message_client = "Quic"))]
-    async fn request(&mut self, req: Req) -> Result<Res, TransportError> {
-        let stream = self.handle.open_bidirectional_stream().await?;
-        let (receive_stream, mut send_stream) = stream.split();
-
-        let encoded = req.encode();
-        send_stream.send(encoded).await.unwrap();
-        let mut response_stream: MessageStream<Res> = receive_stream.into();
-        let (result, _data) = response_stream
-            .next()
-            .await
-            .expect("stream should be open")?;
-
-        Ok(result.into())
-    }
-
-    fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>> {
-        Box::new(QuicMessageClient {
-            handle: self.handle.clone(),
-            phantom1: PhantomData,
-            phantom2: PhantomData,
-        })
-    }
-}
-
-impl<Req, Res> Debug for QuicMessageClient<Req, Res> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QuicMessageClient")
-            .field("socket", &self.handle.remote_addr().unwrap())
-            .finish()
-    }
 }
 
 pub struct ChannelMessageClient<Req, Res> {

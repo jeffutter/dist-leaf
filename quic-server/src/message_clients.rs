@@ -4,19 +4,28 @@ use crate::{
     ServerError, VNodeId,
 };
 use consistent_hash_ring::{Ring, RingBuilder};
-use quic_client::DistKVClient;
-use quic_transport::{ChannelMessageClient, MessageClient};
-use std::{collections::HashMap, net::SocketAddr};
+use quic_transport::{quic::Client, ChannelMessageClient, MessageClient};
+use std::{collections::HashMap, fmt, net::SocketAddr};
 
 pub(crate) struct MessageClients {
     clients: HashMap<VNodeId, Box<dyn MessageClient<ServerRequest, ServerResponse>>>,
     ring: Ring<VNodeId>,
-    client: DistKVClient<ServerRequest, ServerResponse>,
+    client: Client<ServerRequest, ServerResponse>,
+}
+
+impl fmt::Debug for MessageClients {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let vnodes = self.ring.vnodes();
+        f.debug_struct("MessageClients")
+            .field("clients", &self.clients)
+            .field("vnodes", &vnodes)
+            .finish()
+    }
 }
 
 impl MessageClients {
     pub(crate) fn new(
-        client: DistKVClient<ServerRequest, ServerResponse>,
+        client: Client<ServerRequest, ServerResponse>,
         vnode_id: VNodeId,
         storage: db::Database,
     ) -> Self {

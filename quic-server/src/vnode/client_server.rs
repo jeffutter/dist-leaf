@@ -2,13 +2,10 @@ use crate::{
     message_clients::MessageClients,
     protocol::{ServerRequest, ServerResponse},
     vnode::{client_mdns::ClientMDNS, VNodeId},
-    ServerError,
 };
-use bytes::Bytes;
-use futures::StreamExt;
+use async_trait::async_trait;
 use quic_client::protocol::{ClientRequest, ClientResponse};
-use quic_transport::{DataStream, Encode, MessageStream};
-use s2n_quic::{connection, stream::BidirectionalStream, Server};
+use quic_transport::quic::{Handler, Server, ServerError};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
 use tokio::{
     sync::{mpsc, Mutex},
@@ -17,69 +14,37 @@ use tokio::{
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
-/// NOTE: this certificate is to be used for demonstration purposes only!
-pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/cert.pem"));
-/// NOTE: this certificate is to be used for demonstration purposes only!
-pub static KEY_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/key.pem"));
-
 static REPLICATION_FACTOR: usize = 3;
 static CONSISTENCY_LEVEL: usize = match (REPLICATION_FACTOR / 2, REPLICATION_FACTOR % 2) {
     (n, 0) => n,
     (n, _) => n + 1,
 };
 
-pub(crate) struct ClientServer {
+struct ClientHandler {
     clients: Arc<Mutex<MessageClients>>,
     hlc: Arc<Mutex<uhlc::HLC>>,
-    server: s2n_quic::Server,
 }
 
-impl ClientServer {
-    pub(crate) fn new(
-        node_id: Uuid,
-        core_id: Uuid,
-        local_ip: Ipv4Addr,
-        clients: Arc<Mutex<MessageClients>>,
-    ) -> Result<Self, ServerError> {
-        let server = Server::builder()
-            .with_tls((CERT_PEM, KEY_PEM))
-            .map_err(|e| ServerError::Initialization(e.to_string()))?
-            .with_io("0.0.0.0:0")
-            .map_err(|e| ServerError::Initialization(e.to_string()))?
-            .start()
-            .map_err(|e| ServerError::Initialization(e.to_string()))?;
-
-        let port = server
-            .local_addr()
-            .map_err(|e| ServerError::Initialization(e.to_string()))?
-            .port();
-
-        println!("Starting Client Server on Port: {}", port);
-
-        let _mdns = ClientMDNS::new(node_id, core_id, local_ip, port);
-
-        Ok(Self {
-            clients,
-            server,
-            hlc: Arc::new(Mutex::new(uhlc::HLC::default())),
-        })
+impl ClientHandler {
+    fn new(clients: Arc<Mutex<MessageClients>>, hlc: Arc<Mutex<uhlc::HLC>>) -> Self {
+        Self { clients, hlc }
     }
+}
 
-    #[instrument(skip(clients, send_tx, hlc))]
-    async fn handle_request(
+#[async_trait]
+impl Handler<ClientRequest, ClientResponse> for ClientHandler {
+    #[instrument(skip(self, send_tx))]
+    async fn call(
+        &mut self,
         req: ClientRequest,
-        clients: Arc<Mutex<MessageClients>>,
-        hlc: Arc<Mutex<uhlc::HLC>>,
-        send_tx: mpsc::Sender<Bytes>,
+        send_tx: mpsc::Sender<ClientResponse>,
     ) -> Result<(), ServerError> {
         let mut join_set: JoinSet<Result<(VNodeId, ServerResponse), ServerError>> = JoinSet::new();
         let req_key = req.key().clone();
-        let mut cs = clients.lock().await;
+        let mut cs = self.clients.lock().await;
         let replicas = cs.replicas(&req_key, REPLICATION_FACTOR).await;
 
-        event!(Level::DEBUG, "replicas" = ?replicas);
-
-        let local_request_id = hlc.lock().await.new_timestamp();
+        let local_request_id = self.hlc.lock().await.new_timestamp();
         let client_request_id = req.request_id().clone();
         let is_put = match req {
             ClientRequest::Put { .. } => true,
@@ -149,10 +114,7 @@ impl ClientServer {
                             },
                         };
 
-                        send_tx
-                            .send(response.encode())
-                            .await
-                            .expect("channel sould be open");
+                        send_tx.send(response).await.expect("channel sould be open");
 
                         result_sent = true;
 
@@ -196,10 +158,7 @@ impl ClientServer {
                             error: "Results did not match".to_string(),
                         };
 
-                        send_tx
-                            .send(res.encode())
-                            .await
-                            .expect("channel should be open");
+                        send_tx.send(res).await.expect("channel should be open");
                         result_sent = true;
 
                         event!(Level::ERROR, results = ?results, "Results did not match");
@@ -219,10 +178,7 @@ impl ClientServer {
                 error: "Could not fetch enough results".to_string(),
             };
 
-            send_tx
-                .send(res.encode())
-                .await
-                .expect("channel should be open");
+            send_tx.send(res).await.expect("channel should be open");
         }
 
         // For put requests, we want to let all of the writes finish, even if we've hit the
@@ -235,55 +191,34 @@ impl ClientServer {
         Ok::<(), ServerError>(())
     }
 
-    async fn handle_stream(
-        stream: BidirectionalStream,
-        clients: Arc<Mutex<MessageClients>>,
-        hlc: Arc<Mutex<uhlc::HLC>>,
-    ) {
-        let (receive_stream, mut send_stream) = stream.split();
-        let data_stream = DataStream::new(receive_stream);
-        let mut request_stream: MessageStream<ClientRequest> = MessageStream::new(data_stream);
-
-        let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
-            mpsc::channel(100);
-
-        tokio::spawn(async move {
-            while let Some(data) = send_rx.recv().await {
-                send_stream.send(data).await?;
-            }
-
-            Ok::<(), ServerError>(())
-        });
-
-        while let Some(Ok((req, _data))) = request_stream.next().await {
-            let clients = clients.clone();
-            let send_tx = send_tx.clone();
-            let hlc = hlc.clone();
-            tokio::spawn(async move { Self::handle_request(req, clients, hlc, send_tx).await });
-        }
+    fn box_clone(&self) -> Box<dyn Handler<ClientRequest, ClientResponse>> {
+        Box::new(Self::new(self.clients.clone(), self.hlc.clone()))
     }
+}
 
-    async fn handle_connection(
-        mut connection: connection::Connection,
+pub(crate) struct ClientServer {
+    server: Server<ClientRequest, ClientResponse>,
+}
+
+impl ClientServer {
+    pub(crate) fn new(
+        node_id: Uuid,
+        core_id: Uuid,
+        local_ip: Ipv4Addr,
         clients: Arc<Mutex<MessageClients>>,
-        hlc: Arc<Mutex<uhlc::HLC>>,
-    ) {
-        while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
-            tokio::spawn(Self::handle_stream(stream, clients.clone(), hlc.clone()));
-        }
+    ) -> Result<Self, ServerError> {
+        let hlc = Arc::new(Mutex::new(uhlc::HLC::default()));
+        let handler = ClientHandler::new(clients, hlc);
+        let server = Server::new(handler)?;
+
+        println!("Starting Client Server on Port: {}", server.port);
+
+        let _mdns = ClientMDNS::new(node_id, core_id, local_ip, server.port);
+
+        Ok(Self { server })
     }
 
     pub(crate) async fn run(&mut self) -> Result<(), ServerError> {
-        let hlc = self.hlc.clone();
-
-        while let Some(connection) = self.server.accept().await {
-            tokio::spawn(Self::handle_connection(
-                connection,
-                self.clients.clone(),
-                hlc.clone(),
-            ));
-        }
-
-        Ok(())
+        self.server.run().await
     }
 }

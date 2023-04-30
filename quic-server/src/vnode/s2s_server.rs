@@ -1,13 +1,10 @@
 use crate::{
     message_clients::MessageClients,
     protocol::{ServerRequest, ServerResponse},
-    ServerError,
 };
-use bytes::Bytes;
+use async_trait::async_trait;
 use db::DBValue;
-use futures::StreamExt;
-use quic_transport::{DataStream, Encode, MessageStream};
-use s2n_quic::{connection, stream::BidirectionalStream, Server};
+use quic_transport::quic::{Handler, Server, ServerError};
 use std::{net::Ipv4Addr, sync::Arc};
 use tokio::{
     select,
@@ -18,15 +15,38 @@ use uuid::Uuid;
 
 use super::s2s_mdns::S2SMDNS;
 
-/// NOTE: this certificate is to be used for demonstration purposes only!
-pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/cert.pem"));
-/// NOTE: this certificate is to be used for demonstration purposes only!
-pub static KEY_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/key.pem"));
+struct ServerHandler {
+    storage: db::Database,
+}
+
+impl ServerHandler {
+    fn new(storage: db::Database) -> Self {
+        Self { storage }
+    }
+}
+
+#[async_trait]
+impl Handler<ServerRequest, ServerResponse> for ServerHandler {
+    #[instrument(skip(self))]
+    async fn call(
+        &mut self,
+        req: ServerRequest,
+        send_tx: mpsc::Sender<ServerResponse>,
+    ) -> Result<(), ServerError> {
+        let res = S2SServer::handle_local(req, self.storage.clone()).await?;
+        send_tx.send(res).await.expect("stream should be open");
+        Ok(())
+    }
+
+    fn box_clone(&self) -> Box<dyn Handler<ServerRequest, ServerResponse>> {
+        Box::new(Self::new(self.storage.clone()))
+    }
+}
 
 pub(crate) struct S2SServer {
     storage: db::Database,
     pub(crate) mdns: S2SMDNS,
-    server: s2n_quic::Server,
+    server: Server<ServerRequest, ServerResponse>,
     rx: mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>,
 }
 
@@ -39,22 +59,12 @@ impl S2SServer {
         storage: db::Database,
         clients: Arc<Mutex<MessageClients>>,
     ) -> Result<Self, ServerError> {
-        let server = Server::builder()
-            .with_tls((CERT_PEM, KEY_PEM))
-            .map_err(|e| ServerError::Initialization(e.to_string()))?
-            .with_io("0.0.0.0:0")
-            .map_err(|e| ServerError::Initialization(e.to_string()))?
-            .start()
-            .map_err(|e| ServerError::Initialization(e.to_string()))?;
+        let handler = ServerHandler::new(storage.clone());
+        let server = Server::new(handler)?;
 
-        let port = server
-            .local_addr()
-            .map_err(|e| ServerError::Initialization(e.to_string()))?
-            .port();
+        log::debug!("Starting S2S Server on Port: {}", server.port);
 
-        log::debug!("Starting S2S Server on Port: {}", port);
-
-        let mdns = S2SMDNS::new(node_id, core_id, clients.clone(), local_ip, port);
+        let mdns = S2SMDNS::new(node_id, core_id, clients.clone(), local_ip, server.port);
 
         Ok(Self {
             storage,
@@ -71,7 +81,8 @@ impl S2SServer {
     ) -> Result<ServerResponse, ServerError> {
         match req {
             ServerRequest::Get { request_id, key } => {
-                let result = storage.get(&key)?;
+                // TODO: fix this error type
+                let result = storage.get(&key).map_err(|_| ServerError::Unknown)?;
                 let res = match result {
                     Some(data) => ServerResponse::Result {
                         request_id,
@@ -91,50 +102,13 @@ impl S2SServer {
                 key,
                 value,
             } => {
-                storage.put(&key, &DBValue::new(&value, request_id))?;
+                // TODO: fix this error type
+                storage
+                    .put(&key, &DBValue::new(&value, request_id))
+                    .map_err(|_| ServerError::Unknown)?;
                 let res = ServerResponse::Ok { request_id };
                 Ok(res)
             }
-        }
-    }
-
-    async fn handle_local_req(
-        req: ServerRequest,
-        storage: db::Database,
-        send_tx: mpsc::Sender<Bytes>,
-    ) -> Result<(), ServerError> {
-        let res = Self::handle_local(req, storage).await?;
-        let encoded = res.encode();
-        send_tx.send(encoded).await.expect("stream should be open");
-        Ok(())
-    }
-
-    async fn handle_stream(stream: BidirectionalStream, storage: db::Database) {
-        let (receive_stream, mut send_stream) = stream.split();
-        let data_stream = DataStream::new(receive_stream);
-        let mut request_stream: MessageStream<ServerRequest> = MessageStream::new(data_stream);
-
-        let (send_tx, mut send_rx): (mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) =
-            mpsc::channel(100);
-
-        tokio::spawn(async move {
-            while let Some(data) = send_rx.recv().await {
-                send_stream.send(data).await?;
-            }
-
-            Ok::<(), ServerError>(())
-        });
-
-        while let Some(Ok((req, _data))) = request_stream.next().await {
-            let storage = storage.clone();
-            let send_tx = send_tx.clone();
-            tokio::spawn(async move { Self::handle_local_req(req.into(), storage, send_tx).await });
-        }
-    }
-
-    async fn handle_connection(mut connection: connection::Connection, storage: db::Database) {
-        while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
-            tokio::spawn(Self::handle_stream(stream, storage.clone()));
         }
     }
 
@@ -143,14 +117,8 @@ impl S2SServer {
             let storage = self.storage.clone();
 
             select! {
-                // Quic
-                Some(connection) = self.server.accept() => {
-                    // spawn a new task for the connection
-                    tokio::spawn(Self::handle_connection(
-                        connection,
-                        storage,
-                    ));
-                }
+                // Server
+                Ok(()) = self.server.run() => { },
                 // Channel
                 Some((req, tx)) = self.rx.recv() => {
                     // Intentionally don't check for errors/unrwrap as `tx` may have been

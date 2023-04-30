@@ -1263,7 +1263,6 @@ dependencies = [
  "log",
  "mdns-sd",
  "quic-transport",
- "s2n-quic",
  "thiserror",
  "tokio",
  "tracing",
