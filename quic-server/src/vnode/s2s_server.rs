@@ -4,7 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use db::DBValue;
-use quic_transport::quic::{Handler, Server, ServerError};
+use net::quic::{Handler, Server, ServerError};
 use std::{net::Ipv4Addr, sync::Arc};
 use tokio::{
     select,

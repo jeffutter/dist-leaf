@@ -5,7 +5,7 @@ mod vnode;
 use clap::Parser;
 use db::Database;
 use env_logger::Env;
-use quic_transport::{quic::ServerError, ChannelMessageClient};
+use net::{quic::ServerError, ChannelMessageClient};
 use std::{collections::HashMap, error::Error, thread};
 use tokio::{
     runtime,

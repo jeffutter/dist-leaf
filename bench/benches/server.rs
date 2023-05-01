@@ -6,8 +6,8 @@ use criterion::{BatchSize, BenchmarkId};
 use env_logger::Env;
 use itertools::Itertools;
 use quic_client::protocol::{ClientRequest, ClientResponse};
-use quic_transport::quic;
-use quic_transport::MessageClient;
+use net::quic;
+use net::MessageClient;
 use rand::seq::SliceRandom;
 use tokio::runtime::{self, Handle};
 

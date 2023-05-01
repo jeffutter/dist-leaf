@@ -12,7 +12,7 @@ log = "0.4"
 futures = "0.3"
 env_logger = "0.10"
 thiserror = "1"
-quic-transport = { path = "../quic-transport" }
+net = { path = "../net" }
 bytes = "1"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3"

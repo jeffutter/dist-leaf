@@ -3,6 +3,6 @@ members = [
   "bench",
   "quic-server",
   "quic-client",
-  "quic-transport",
+  "net",
   "db"
 ]

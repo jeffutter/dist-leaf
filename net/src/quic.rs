@@ -19,9 +19,9 @@ use crate::{
 };
 
 /// NOTE: this certificate is to be used for demonstration purposes only!
-pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/cert.pem"));
+pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/cert.pem"));
 /// NOTE: this certificate is to be used for demonstration purposes only!
-pub static KEY_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cli/key.pem"));
+pub static KEY_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/key.pem"));
 
 #[derive(Error, Debug)]
 pub enum ServerError {

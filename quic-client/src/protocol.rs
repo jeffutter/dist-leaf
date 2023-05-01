@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use capnp::serialize;
-use quic_transport::{Decode, Encode, TransportError};
+use net::{Decode, Encode, TransportError};
 use std::io::Write;
 use tracing::instrument;
 

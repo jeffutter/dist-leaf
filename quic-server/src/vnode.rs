@@ -10,7 +10,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use db::DBValue;
-use quic_transport::{
+use net::{
     quic::{Client, ServerError},
     ChannelMessageClient, MessageClient, TransportError,
 };

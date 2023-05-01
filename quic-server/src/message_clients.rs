@@ -4,7 +4,7 @@ use crate::{
     ServerError, VNodeId,
 };
 use consistent_hash_ring::{Ring, RingBuilder};
-use quic_transport::{quic::Client, ChannelMessageClient, MessageClient};
+use net::{quic::Client, ChannelMessageClient, MessageClient};
 use std::{collections::HashMap, fmt, net::SocketAddr};
 
 pub(crate) struct MessageClients {

@@ -5,7 +5,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use quic_client::protocol::{ClientRequest, ClientResponse};
-use quic_transport::quic::{Handler, Server, ServerError};
+use net::quic::{Handler, Server, ServerError};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
 use tokio::{
     sync::{mpsc, Mutex},

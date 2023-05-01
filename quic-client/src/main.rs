@@ -3,7 +3,7 @@ mod protocol;
 
 use env_logger::Env;
 use protocol::{ClientRequest, ClientResponse};
-use quic_transport::{quic::Client, MessageClient};
+use net::{quic::Client, MessageClient};
 use std::{
     error::Error,
     sync::{Arc, Mutex},
