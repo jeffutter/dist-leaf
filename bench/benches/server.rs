@@ -1,28 +1,21 @@
 use std::io::BufRead;
 use std::net::SocketAddr;
 
-use criterion::BenchmarkId;
 use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{BatchSize, BenchmarkId};
 use env_logger::Env;
 use itertools::Itertools;
 use quic_client::protocol::{ClientRequest, ClientResponse};
 use quic_transport::quic;
 use quic_transport::MessageClient;
-use tokio::runtime;
+use rand::seq::SliceRandom;
+use tokio::runtime::{self, Handle};
 
 fn criterion_benchmark(c: &mut Criterion) {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let hlc = uhlc::HLC::default();
-    let keys: Vec<String> = fake::vec![String; 2..10];
-    let values: Vec<String> = fake::vec![String; 2..10];
-
-    let kvs = keys
-        .iter()
-        .cartesian_product(values.iter())
-        .cycle()
-        .take(100)
-        .map(|(k, v)| (k, v, hlc.new_timestamp()))
-        .collect_vec();
+    let keys: Vec<String> = fake::vec![String; 2..20];
+    let values: Vec<String> = fake::vec![String; 2..20];
 
     let rt = runtime::Runtime::new().unwrap();
 
@@ -31,48 +24,67 @@ fn criterion_benchmark(c: &mut Criterion) {
     let port = stdin.lock().lines().next().unwrap().unwrap();
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
+    let kvs = keys
+        .into_iter()
+        .cartesian_product(values.into_iter())
+        .cycle()
+        .take(1000)
+        .map(|(k, v)| (k, v, hlc.new_timestamp()))
+        .collect::<Vec<_>>();
+
     let connection = rt.block_on(async {
         let client = quic::Client::<ClientRequest, ClientResponse>::new().unwrap();
-        client.connect(addr).await.unwrap()
+        let connection = client.connect(addr).await.unwrap();
+        connection
     });
 
     c.bench_with_input(BenchmarkId::new("Put", kvs.len()), &kvs, |b, kvs| {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
-            .iter(|| {
-                let connection = connection.clone();
-                async move {
-                    let mut stream = connection.stream().await.unwrap();
-                    for (key, value, timestamp) in kvs {
-                        stream
-                            .request(ClientRequest::Put {
-                                key: key.to_string(),
-                                value: value.to_string(),
-                                request_id: *timestamp,
-                            })
-                            .await
-                            .unwrap();
-                    }
-                }
-            })
+            .iter_batched(
+                || {
+                    let handle = Handle::current();
+                    let _ = handle.enter();
+                    let stream =
+                        futures::executor::block_on(async { connection.stream().await.unwrap() });
+                    let value = kvs.choose(&mut rand::thread_rng()).unwrap();
+                    (stream, value)
+                },
+                |(mut stream, (key, value, timestamp))| async move {
+                    stream
+                        .request(ClientRequest::Put {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            request_id: *timestamp,
+                        })
+                        .await
+                        .unwrap();
+                },
+                BatchSize::PerIteration,
+            )
     });
 
     c.bench_with_input(BenchmarkId::new("Get", kvs.len()), &kvs, |b, kvs| {
         b.to_async(tokio::runtime::Runtime::new().unwrap())
-            .iter(|| {
-                let connection = connection.clone();
-                async move {
-                    let mut stream = connection.stream().await.unwrap();
-                    for (key, _, timestamp) in kvs {
-                        stream
-                            .request(ClientRequest::Get {
-                                key: key.to_string(),
-                                request_id: *timestamp,
-                            })
-                            .await
-                            .unwrap();
-                    }
-                }
-            })
+            .iter_batched(
+                || {
+                    let handle = Handle::current();
+                    let _ = handle.enter();
+                    let stream =
+                        futures::executor::block_on(async { connection.stream().await.unwrap() });
+                    let value = kvs.choose(&mut rand::thread_rng()).unwrap();
+                    (stream, value)
+                },
+                |(mut stream, (key, _, timestamp))| async move {
+                    stream
+                        .request(ClientRequest::Get {
+                            key: key.to_string(),
+                            request_id: *timestamp,
+                        })
+                        .await
+                        .unwrap();
+                },
+                BatchSize::SmallInput,
+            )
     });
 }
 
