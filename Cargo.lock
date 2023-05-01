@@ -121,7 +121,6 @@ checksum = "a4a4ddaa51a5bc52a6948f74c06d20aaaddb71924eab79b8c97a8c556e942d6a"
 name = "bench"
 version = "0.1.0"
 dependencies = [
- "core_affinity",
  "criterion",
  "env_logger",
  "fake",
@@ -129,7 +128,6 @@ dependencies = [
  "itertools",
  "log",
  "net",
- "num_cpus",
  "quic-client",
  "rand 0.8.5",
  "tokio",
@@ -1305,7 +1303,6 @@ dependencies = [
  "net",
  "quic-client",
  "rand 0.8.5",
- "s2n-quic",
  "tempfile",
  "thiserror",
  "tokio",

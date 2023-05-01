@@ -16,8 +16,6 @@ quic-client = { path = "../quic-client" }
 tokio = { version = "1.26.0", features = ["macros", "rt"] }
 futures = "0.3.26"
 env_logger = "0.10.0"
-num_cpus = "1"
-core_affinity = "0.8"
 log = "0.4"
 net = { path = "../net" }
 uhlc = "0.5"
