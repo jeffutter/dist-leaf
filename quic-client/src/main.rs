@@ -2,8 +2,8 @@ mod mdns;
 mod protocol;
 
 use env_logger::Env;
+use net::{quic::QuicClient, Client};
 use protocol::{ClientRequest, ClientResponse};
-use net::{quic::Client, MessageClient};
 use std::{
     error::Error,
     sync::{Arc, Mutex},
@@ -30,8 +30,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let hlc = Arc::new(Mutex::new(uhlc::HLC::default()));
     println!("Client Found: {:?}", addr);
 
-    let client: Client<ClientRequest, ClientResponse> = Client::new()?;
-    let connection = client.connect(*addr).await?;
+    let client: QuicClient<ClientRequest, ClientResponse> = QuicClient::new()?;
+    let connection = client.connection(*addr).await?;
     let mut stream = connection.stream().await?;
 
     println!("Client Ready");

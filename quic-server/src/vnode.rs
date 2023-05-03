@@ -11,7 +11,7 @@ use crate::{
 use async_trait::async_trait;
 use db::DBValue;
 use net::{
-    quic::{Client, ServerError},
+    quic::{QuicClient, ServerError},
     ChannelMessageClient, MessageClient, TransportError,
 };
 use std::fmt::Debug;
@@ -50,7 +50,7 @@ impl VNode {
         data_path: std::path::PathBuf,
     ) -> Result<Self, ServerError> {
         let vnode_id = VNodeId::new(node_id, core_id);
-        let client = Client::new().unwrap();
+        let client = QuicClient::new().unwrap();
         let storage = db::Database::new(&data_path);
 
         let mut connections =

@@ -5,6 +5,7 @@ use std::{
     convert::From,
     fmt::Debug,
     marker::{PhantomData, Send},
+    net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -189,6 +190,21 @@ where
     fn size_hint(&self) -> (usize, Option<usize>) {
         (0, None)
     }
+}
+
+#[async_trait]
+pub trait Client<Req, Res> {
+    async fn connection(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<Box<dyn Connection<Req, Res>>, TransportError>;
+    fn box_clone(&self) -> Box<dyn Client<Req, Res>>;
+}
+
+#[async_trait]
+pub trait Connection<Req, Res>: Send + Sync {
+    async fn stream(&self) -> Result<Box<dyn MessageClient<Req, Res>>, TransportError>;
+    fn box_clone(&self) -> Box<dyn Connection<Req, Res>>;
 }
 
 #[async_trait]

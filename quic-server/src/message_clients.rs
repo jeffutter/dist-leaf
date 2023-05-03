@@ -4,13 +4,13 @@ use crate::{
     ServerError, VNodeId,
 };
 use consistent_hash_ring::{Ring, RingBuilder};
-use net::{quic::Client, ChannelMessageClient, MessageClient};
+use net::{quic::QuicClient, ChannelMessageClient, Client, MessageClient};
 use std::{collections::HashMap, fmt, net::SocketAddr};
 
 pub(crate) struct MessageClients {
     clients: HashMap<VNodeId, Box<dyn MessageClient<ServerRequest, ServerResponse>>>,
     ring: Ring<VNodeId>,
-    client: Client<ServerRequest, ServerResponse>,
+    client: QuicClient<ServerRequest, ServerResponse>,
 }
 
 impl fmt::Debug for MessageClients {
@@ -25,7 +25,7 @@ impl fmt::Debug for MessageClients {
 
 impl MessageClients {
     pub(crate) fn new(
-        client: Client<ServerRequest, ServerResponse>,
+        client: QuicClient<ServerRequest, ServerResponse>,
         vnode_id: VNodeId,
         storage: db::Database,
     ) -> Self {
@@ -50,9 +50,9 @@ impl MessageClients {
         addr: SocketAddr,
     ) -> Result<(), ServerError> {
         if let None = self.clients.get(&vnode_id) {
-            let connection = self.client.connect(addr).await.unwrap();
+            let connection = self.client.connection(addr).await.unwrap();
             let stream = connection.stream().await.unwrap();
-            self.clients.insert(vnode_id.clone(), Box::new(stream));
+            self.clients.insert(vnode_id.clone(), stream);
             self.ring.insert(vnode_id);
         }
 

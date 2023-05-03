@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tracing::instrument;
 
 use crate::{
-    ClientError, DataStream, Decode, Encode, MessageClient as TMessageClient, MessageStream,
+    Client, ClientError, Connection, DataStream, Decode, Encode, MessageClient, MessageStream,
     TransportError,
 };
 
@@ -39,16 +39,17 @@ pub enum ServerError {
     Response(String),
 }
 
-pub struct Client<Req, Res> {
+#[derive(Clone)]
+pub struct QuicClient<Req, Res> {
     client: QClient,
     req: PhantomData<Req>,
     res: PhantomData<Res>,
 }
 
-impl<Req, Res> Client<Req, Res>
+impl<Req, Res> QuicClient<Req, Res>
 where
-    Req: Encode + Decode + Debug + Send,
-    Res: Encode + Decode + Debug + Sync + Send + 'static,
+    Req: Encode + Decode + Debug + Send + Clone,
+    Res: Encode + Decode + Debug + Sync + Send + Clone + 'static,
 {
     pub fn new() -> Result<Self, ClientError> {
         let client = QClient::builder()
@@ -65,27 +66,45 @@ where
             res: PhantomData,
         })
     }
+}
 
-    pub async fn connect(&self, addr: SocketAddr) -> Result<Connection<Req, Res>, ClientError> {
+#[async_trait]
+impl<Req, Res> Client<Req, Res> for QuicClient<Req, Res>
+where
+    Req: Encode + Decode + Debug + Sync + Send + Clone + 'static,
+    Res: Encode + Decode + Debug + Sync + Send + Clone + 'static,
+{
+    async fn connection(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<Box<dyn Connection<Req, Res>>, TransportError> {
         let connect = Connect::new(addr).with_server_name("localhost");
         let mut connection = self.client.connect(connect).await?;
         // ensure the connection doesn't time out with inactivity
         connection.keep_alive(true)?;
 
-        let conn = Connection::new(connection).await;
+        let conn = QuicConnection::new(connection).await;
 
-        Ok(conn)
+        Ok(Box::new(conn))
+    }
+
+    fn box_clone(&self) -> Box<dyn Client<Req, Res>> {
+        Box::new(QuicClient {
+            client: self.client.clone(),
+            req: PhantomData,
+            res: PhantomData,
+        })
     }
 }
 
 #[derive(Clone)]
-pub struct Connection<Req, Res> {
+pub struct QuicConnection<Req, Res> {
     connection: Handle,
     req: PhantomData<Req>,
     res: PhantomData<Res>,
 }
 
-impl<Req, Res> Connection<Req, Res>
+impl<Req, Res> QuicConnection<Req, Res>
 where
     Req: Encode + Decode + Debug + Send,
     Res: Encode + Decode + Debug + Sync + Send + 'static,
@@ -97,36 +116,49 @@ where
             res: PhantomData,
         }
     }
+}
 
-    pub async fn stream(&self) -> Result<MessageClient<Req, Res>, ClientError> {
-        MessageClient::new(self.connection.clone())
-            .await
-            .map_err(|e| e.into())
+#[async_trait]
+impl<Req, Res> Connection<Req, Res> for QuicConnection<Req, Res>
+where
+    Req: Encode + Decode + Debug + Sync + Send + 'static,
+    Res: Encode + Decode + Debug + Sync + Send + 'static,
+{
+    async fn stream(&self) -> Result<Box<dyn MessageClient<Req, Res>>, TransportError> {
+        Ok(Box::new(QuicMessageClient::new(self.connection.clone())))
+    }
+
+    fn box_clone(&self) -> Box<dyn Connection<Req, Res>> {
+        Box::new(QuicConnection {
+            connection: self.connection.clone(),
+            req: PhantomData,
+            res: PhantomData,
+        })
     }
 }
 
-pub struct MessageClient<Req, Res> {
+pub struct QuicMessageClient<Req, Res> {
     handle: Handle,
     phantom1: PhantomData<Req>,
     phantom2: PhantomData<Res>,
 }
 
-impl<Req, Res> MessageClient<Req, Res>
+impl<Req, Res> QuicMessageClient<Req, Res>
 where
     Req: Encode + Decode + Debug,
     Res: Encode + Decode + Debug + Sync + Send + 'static,
 {
-    pub async fn new(connection: Handle) -> Result<Self, TransportError> {
-        Ok(Self {
+    pub fn new(connection: Handle) -> Self {
+        Self {
             handle: connection,
             phantom1: PhantomData,
             phantom2: PhantomData,
-        })
+        }
     }
 }
 
 #[async_trait]
-impl<Req, Res> TMessageClient<Req, Res> for MessageClient<Req, Res>
+impl<Req, Res> MessageClient<Req, Res> for QuicMessageClient<Req, Res>
 where
     Req: Encode + Decode + Send + Sync + Debug + 'static,
     Res: Encode + Decode + Send + Sync + Debug + 'static,
@@ -148,8 +180,8 @@ where
         Ok(result.into())
     }
 
-    fn box_clone(&self) -> Box<dyn TMessageClient<Req, Res>> {
-        Box::new(MessageClient {
+    fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>> {
+        Box::new(QuicMessageClient {
             handle: self.handle.clone(),
             phantom1: PhantomData,
             phantom2: PhantomData,
@@ -157,9 +189,9 @@ where
     }
 }
 
-impl<Req, Res> Debug for MessageClient<Req, Res> {
+impl<Req, Res> Debug for QuicMessageClient<Req, Res> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MessageClient")
+        f.debug_struct("QuicMessageClient")
             .field("socket", &self.handle.remote_addr().unwrap())
             .finish()
     }

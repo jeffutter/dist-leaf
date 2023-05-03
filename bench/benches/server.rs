@@ -5,9 +5,9 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use criterion::{BatchSize, BenchmarkId};
 use env_logger::Env;
 use itertools::Itertools;
+use net::quic::QuicClient;
+use net::Client;
 use quic_client::protocol::{ClientRequest, ClientResponse};
-use net::quic;
-use net::MessageClient;
 use rand::seq::SliceRandom;
 use tokio::runtime::{self, Handle};
 
@@ -33,8 +33,8 @@ fn criterion_benchmark(c: &mut Criterion) {
         .collect::<Vec<_>>();
 
     let connection = rt.block_on(async {
-        let client = quic::Client::<ClientRequest, ClientResponse>::new().unwrap();
-        let connection = client.connect(addr).await.unwrap();
+        let client = QuicClient::<ClientRequest, ClientResponse>::new().unwrap();
+        let connection = client.connection(addr).await.unwrap();
         connection
     });
 
