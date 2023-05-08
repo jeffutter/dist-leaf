@@ -1,27 +1,32 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
     time::Duration,
 };
 
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
-use tokio::{sync::Mutex, task, time};
+use net::quic::QuicClient;
+use tokio::{task, time};
 use uuid::Uuid;
 
-use crate::{message_clients::MessageClients, ServerError, VNodeId};
+use crate::{
+    node_registry::{ClientRegistry, Locality},
+    protocol::{ServerRequest, ServerResponse},
+    ServerError, VNodeId,
+};
 
 #[derive(Clone)]
 pub struct S2SMDNS {
     receiver: Receiver<ServiceEvent>,
     local_socket_addr: SocketAddr,
-    clients: Arc<Mutex<MessageClients>>,
+    client_registry: ClientRegistry<ServerRequest, ServerResponse>,
+    node_id: Uuid,
 }
 
 impl S2SMDNS {
     pub(crate) fn new(
         node_id: Uuid,
         core_id: Uuid,
-        clients: Arc<Mutex<MessageClients>>,
+        client_registry: ClientRegistry<ServerRequest, ServerResponse>,
         local_ip: Ipv4Addr,
         port: u16,
     ) -> Self {
@@ -51,7 +56,8 @@ impl S2SMDNS {
         Self {
             receiver,
             local_socket_addr,
-            clients,
+            client_registry,
+            node_id,
         }
     }
 
@@ -59,7 +65,8 @@ impl S2SMDNS {
         let mut interval = time::interval(Duration::from_secs(30));
         let receiver = self.receiver.clone();
         let local_socket_addr = self.local_socket_addr.clone();
-        let clients = self.clients.clone();
+        let mut client_registry = self.client_registry.clone();
+        let this_node_id = self.node_id.clone();
 
         task::spawn(async move {
             loop {
@@ -77,30 +84,33 @@ impl S2SMDNS {
                                 .unwrap()
                                 .parse()
                                 .unwrap();
-                            let vnode_id = VNodeId::new(node_id, core_id);
+                            if node_id != this_node_id {
+                                let vnode_id = VNodeId::new(node_id, core_id);
 
-                            log::debug!(
-                                "Resolved a new service: {} {}",
-                                info.get_fullname(),
-                                info.get_port()
-                            );
+                                log::debug!(
+                                    "Resolved a new service: {} {}",
+                                    info.get_fullname(),
+                                    info.get_port()
+                                );
 
-                            let socket_addr: SocketAddr = SocketAddr::new(
-                                info.get_addresses()
-                                    .iter()
-                                    .next()
-                                    .unwrap()
-                                    .to_owned()
-                                    .into(),
-                                info.get_port(),
-                            );
+                                let socket_addr: SocketAddr = SocketAddr::new(
+                                    info.get_addresses()
+                                        .iter()
+                                        .next()
+                                        .unwrap()
+                                        .to_owned()
+                                        .into(),
+                                    info.get_port(),
+                                );
 
-                            if socket_addr != local_socket_addr {
-                                clients
-                                    .lock()
-                                    .await
-                                    .add_connection(vnode_id, socket_addr)
-                                    .await?;
+                                if socket_addr != local_socket_addr {
+                                    let client = QuicClient::new(socket_addr)
+                                        .map_err(|e| ServerError::Initialization(e.to_string()))?;
+
+                                    client_registry
+                                        .add(vnode_id, &Locality::Remote, client)
+                                        .await
+                                }
                             }
                         }
                         ServiceEvent::SearchStarted(_) => (),

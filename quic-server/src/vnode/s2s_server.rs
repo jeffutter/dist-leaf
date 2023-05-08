@@ -1,14 +1,18 @@
 use crate::{
-    message_clients::MessageClients,
+    node_registry::{ClientRegistry, Locality},
     protocol::{ServerRequest, ServerResponse},
+    vnode::VNodeId,
 };
 use async_trait::async_trait;
 use db::DBValue;
-use net::quic::{Handler, Server, ServerError};
-use std::{net::Ipv4Addr, sync::Arc};
+use net::{
+    quic::{Handler, Server, ServerError},
+    ChannelClient,
+};
+use std::net::Ipv4Addr;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, Mutex},
+    sync::{mpsc, oneshot},
 };
 use tracing::instrument;
 use uuid::Uuid;
@@ -51,20 +55,26 @@ pub(crate) struct S2SServer {
 }
 
 impl S2SServer {
-    pub(crate) fn new(
+    pub(crate) async fn new(
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        rx: mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>,
         storage: db::Database,
-        clients: Arc<Mutex<MessageClients>>,
+        mut client_registry: ClientRegistry<ServerRequest, ServerResponse>,
     ) -> Result<Self, ServerError> {
+        let vnode_id = VNodeId::new(node_id, core_id);
         let handler = ServerHandler::new(storage.clone());
         let server = Server::new(handler)?;
 
         log::debug!("Starting S2S Server on Port: {}", server.port);
 
-        let mdns = S2SMDNS::new(node_id, core_id, clients.clone(), local_ip, server.port);
+        let (tx, rx) = mpsc::channel::<(ServerRequest, oneshot::Sender<ServerResponse>)>(1);
+        let client = ChannelClient::new(tx);
+        client_registry
+            .add(vnode_id, &Locality::Channel, client)
+            .await;
+
+        let mdns = S2SMDNS::new(node_id, core_id, client_registry, local_ip, server.port);
 
         Ok(Self {
             storage,

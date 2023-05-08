@@ -42,6 +42,7 @@ pub enum ServerError {
 #[derive(Clone)]
 pub struct QuicClient<Req, Res> {
     client: QClient,
+    addr: SocketAddr,
     req: PhantomData<Req>,
     res: PhantomData<Res>,
 }
@@ -51,7 +52,7 @@ where
     Req: Encode + Decode + Debug + Send + Clone,
     Res: Encode + Decode + Debug + Sync + Send + Clone + 'static,
 {
-    pub fn new() -> Result<Self, ClientError> {
+    pub fn new(addr: SocketAddr) -> Result<Self, ClientError> {
         let client = QClient::builder()
             .with_tls(CERT_PEM)
             .map_err(|e| ClientError::Initialization(e.to_string()))?
@@ -62,6 +63,7 @@ where
 
         Ok(Self {
             client,
+            addr,
             req: PhantomData,
             res: PhantomData,
         })
@@ -74,11 +76,8 @@ where
     Req: Encode + Decode + Debug + Sync + Send + Clone + 'static,
     Res: Encode + Decode + Debug + Sync + Send + Clone + 'static,
 {
-    async fn connection(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<Box<dyn Connection<Req, Res>>, TransportError> {
-        let connect = Connect::new(addr).with_server_name("localhost");
+    async fn connection(&self) -> Result<Box<dyn Connection<Req, Res>>, TransportError> {
+        let connect = Connect::new(self.addr).with_server_name("localhost");
         let mut connection = self.client.connect(connect).await?;
         // ensure the connection doesn't time out with inactivity
         connection.keep_alive(true)?;
@@ -91,6 +90,7 @@ where
     fn box_clone(&self) -> Box<dyn Client<Req, Res>> {
         Box::new(QuicClient {
             client: self.client.clone(),
+            addr: self.addr.clone(),
             req: PhantomData,
             res: PhantomData,
         })

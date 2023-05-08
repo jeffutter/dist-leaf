@@ -1,20 +1,17 @@
-mod message_clients;
+mod node_registry;
 mod protocol;
 mod vnode;
 
 use clap::Parser;
 use db::Database;
 use env_logger::Env;
-use net::{quic::ServerError, ChannelMessageClient};
+use net::quic::ServerError;
 use std::{collections::HashMap, error::Error, thread};
-use tokio::{
-    runtime,
-    sync::{mpsc, oneshot},
-};
+use tokio::runtime;
 use uuid::Uuid;
 use vnode::VNodeId;
 
-use crate::protocol::{ServerRequest, ServerResponse};
+use crate::node_registry::ClientRegistry;
 use crate::vnode::VNode;
 use tempfile::TempDir;
 
@@ -73,49 +70,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let core_ids = core_affinity::get_core_ids().unwrap();
 
-    let (mut core_to_vnode_id, mut core_to_rx, core_to_cmc): (
-        HashMap<usize, VNodeId>,
-        HashMap<usize, mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>>,
-        HashMap<VNodeId, ChannelMessageClient<ServerRequest, ServerResponse>>,
-    ) = core_ids.iter().fold(
-        (HashMap::new(), HashMap::new(), HashMap::new()),
-        |(mut core_to_vnode_id, mut rx_acc, mut tx_acc), id| {
-            let id = id.id;
-            let id_key = format!("core_id:{}:{}", node_id, id);
-            let core_id = match shared_db.get(&id_key) {
-                Ok(None) => {
-                    let core_id = Uuid::new_v4();
-                    shared_db
-                        .put(
-                            &id_key,
-                            &db::DBValue {
-                                ts: hlc.new_timestamp(),
-                                data: core_id.to_string().into(),
-                            },
-                        )
-                        .unwrap();
-                    core_id
-                }
-                Ok(Some(data)) => data.data.parse().unwrap(),
-                _ => unimplemented!(),
-            };
-            let vnode_id = VNodeId::new(node_id, core_id);
-            let (tx, rx) = mpsc::channel::<(ServerRequest, oneshot::Sender<ServerResponse>)>(1);
-            let channel_message_client = ChannelMessageClient::new(tx);
-            core_to_vnode_id.insert(id, vnode_id.clone());
-            rx_acc.insert(id, rx);
-            tx_acc.insert(vnode_id, channel_message_client);
-            (core_to_vnode_id, rx_acc, tx_acc)
-        },
-    );
+    let mut core_to_vnode_id: HashMap<usize, VNodeId> =
+        core_ids
+            .iter()
+            .fold(HashMap::new(), |mut core_to_vnode_id, id| {
+                let id = id.id;
+                let id_key = format!("core_id:{}:{}", node_id, id);
+                let core_id = match shared_db.get(&id_key) {
+                    Ok(None) => {
+                        let core_id = Uuid::new_v4();
+                        shared_db
+                            .put(
+                                &id_key,
+                                &db::DBValue {
+                                    ts: hlc.new_timestamp(),
+                                    data: core_id.to_string().into(),
+                                },
+                            )
+                            .unwrap();
+                        core_id
+                    }
+                    Ok(Some(data)) => data.data.parse().unwrap(),
+                    _ => unimplemented!(),
+                };
+                let vnode_id = VNodeId::new(node_id, core_id);
+                core_to_vnode_id.insert(id, vnode_id.clone());
+                core_to_vnode_id
+            });
+
+    let client_registry = ClientRegistry::new();
 
     let handles = core_ids
         .into_iter()
         .map(|id| {
-            let rx = core_to_rx.remove(&id.id).unwrap();
             let vnode_id = core_to_vnode_id.remove(&id.id).unwrap();
             let VNodeId { node_id, core_id } = vnode_id;
-            let core_to_cmc = core_to_cmc.clone();
+            let client_registry = client_registry.clone();
 
             let mut data_path = base_path.clone();
             // data_path.push(core_id.to_string());
@@ -134,7 +124,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                     rt.block_on(async {
                         let mut vnode =
-                            VNode::new(node_id, core_id, local_ip, rx, core_to_cmc, data_path)?;
+                            VNode::new(node_id, core_id, local_ip, client_registry, data_path)
+                                .await?;
 
                         let _ = vnode.s2s_server.mdns.spawn().await;
                         vnode.run().await?;

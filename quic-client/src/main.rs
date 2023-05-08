@@ -30,8 +30,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let hlc = Arc::new(Mutex::new(uhlc::HLC::default()));
     println!("Client Found: {:?}", addr);
 
-    let client: QuicClient<ClientRequest, ClientResponse> = QuicClient::new()?;
-    let connection = client.connection(*addr).await?;
+    let client: QuicClient<ClientRequest, ClientResponse> = QuicClient::new(*addr)?;
+    let connection = client.connection().await?;
     let mut stream = connection.stream().await?;
 
     println!("Client Ready");

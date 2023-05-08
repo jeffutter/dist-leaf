@@ -5,7 +5,6 @@ use std::{
     convert::From,
     fmt::Debug,
     marker::{PhantomData, Send},
-    net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -193,11 +192,8 @@ where
 }
 
 #[async_trait]
-pub trait Client<Req, Res> {
-    async fn connection(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<Box<dyn Connection<Req, Res>>, TransportError>;
+pub trait Client<Req, Res>: Send + Sync {
+    async fn connection(&self) -> Result<Box<dyn Connection<Req, Res>>, TransportError>;
     fn box_clone(&self) -> Box<dyn Client<Req, Res>>;
 }
 
@@ -213,19 +209,11 @@ pub trait MessageClient<Req, Res>: Send + Sync + Debug {
     fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>>;
 }
 
-pub struct ChannelMessageClient<Req, Res> {
+pub struct ChannelClient<Req, Res> {
     server: mpsc::Sender<(Req, oneshot::Sender<Res>)>,
 }
 
-impl<Req, Res> Clone for ChannelMessageClient<Req, Res> {
-    fn clone(&self) -> ChannelMessageClient<Req, Res> {
-        ChannelMessageClient {
-            server: self.server.clone(),
-        }
-    }
-}
-
-impl<Req, Res> ChannelMessageClient<Req, Res>
+impl<Req, Res> ChannelClient<Req, Res>
 where
     Req: Debug,
     Res: Debug,
@@ -235,8 +223,48 @@ where
     }
 }
 
+impl<Req, Res> Clone for ChannelClient<Req, Res> {
+    fn clone(&self) -> ChannelClient<Req, Res> {
+        ChannelClient {
+            server: self.server.clone(),
+        }
+    }
+}
+
 #[async_trait]
-impl<Req, Res> MessageClient<Req, Res> for ChannelMessageClient<Req, Res>
+impl<Req, Res> Client<Req, Res> for ChannelClient<Req, Res>
+where
+    Req: Send + Sync + Debug + 'static,
+    Res: Send + Sync + Debug + 'static,
+{
+    async fn connection(&self) -> Result<Box<dyn Connection<Req, Res>>, TransportError> {
+        Ok(Box::new(ChannelClient::new(self.server.clone())))
+    }
+    fn box_clone(&self) -> Box<dyn Client<Req, Res>> {
+        Box::new(Self {
+            server: self.server.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl<Req, Res> Connection<Req, Res> for ChannelClient<Req, Res>
+where
+    Req: Send + Sync + Debug + 'static,
+    Res: Send + Sync + Debug + 'static,
+{
+    async fn stream(&self) -> Result<Box<dyn MessageClient<Req, Res>>, TransportError> {
+        Ok(Box::new(ChannelClient::new(self.server.clone())))
+    }
+    fn box_clone(&self) -> Box<dyn Connection<Req, Res>> {
+        Box::new(Self {
+            server: self.server.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl<Req, Res> MessageClient<Req, Res> for ChannelClient<Req, Res>
 where
     Req: Debug + Send + 'static,
     Res: Debug + Send + 'static,
@@ -254,15 +282,15 @@ where
     }
 
     fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>> {
-        Box::new(ChannelMessageClient {
+        Box::new(ChannelClient {
             server: self.server.clone(),
         })
     }
 }
 
-impl<Req, Res> Debug for ChannelMessageClient<Req, Res> {
+impl<Req, Res> Debug for ChannelClient<Req, Res> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ChannelMessageClient").finish()
+        f.debug_struct("ChannelClient").finish()
     }
 }
 

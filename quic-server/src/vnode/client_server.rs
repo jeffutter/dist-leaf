@@ -1,11 +1,11 @@
 use crate::{
-    message_clients::MessageClients,
+    node_registry::ConnectionRegistry,
     protocol::{ServerRequest, ServerResponse},
     vnode::{client_mdns::ClientMDNS, VNodeId},
 };
 use async_trait::async_trait;
-use quic_client::protocol::{ClientRequest, ClientResponse};
 use net::quic::{Handler, Server, ServerError};
+use quic_client::protocol::{ClientRequest, ClientResponse};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
 use tokio::{
     sync::{mpsc, Mutex},
@@ -21,13 +21,19 @@ static CONSISTENCY_LEVEL: usize = match (REPLICATION_FACTOR / 2, REPLICATION_FAC
 };
 
 struct ClientHandler {
-    clients: Arc<Mutex<MessageClients>>,
     hlc: Arc<Mutex<uhlc::HLC>>,
+    connection_registry: ConnectionRegistry<ServerRequest, ServerResponse>,
 }
 
 impl ClientHandler {
-    fn new(clients: Arc<Mutex<MessageClients>>, hlc: Arc<Mutex<uhlc::HLC>>) -> Self {
-        Self { clients, hlc }
+    fn new(
+        connection_registry: ConnectionRegistry<ServerRequest, ServerResponse>,
+        hlc: Arc<Mutex<uhlc::HLC>>,
+    ) -> Self {
+        Self {
+            connection_registry,
+            hlc,
+        }
     }
 }
 
@@ -41,8 +47,12 @@ impl Handler<ClientRequest, ClientResponse> for ClientHandler {
     ) -> Result<(), ServerError> {
         let mut join_set: JoinSet<Result<(VNodeId, ServerResponse), ServerError>> = JoinSet::new();
         let req_key = req.key().clone();
-        let mut cs = self.clients.lock().await;
-        let replicas = cs.replicas(&req_key, REPLICATION_FACTOR).await;
+        let replicas = self
+            .connection_registry
+            .replicas(&req_key, REPLICATION_FACTOR)
+            .await;
+
+        event!(Level::INFO, "Fetching {:?} from: {:?}", req, replicas);
 
         let local_request_id = self.hlc.lock().await.new_timestamp();
         let client_request_id = req.request_id().clone();
@@ -192,7 +202,10 @@ impl Handler<ClientRequest, ClientResponse> for ClientHandler {
     }
 
     fn box_clone(&self) -> Box<dyn Handler<ClientRequest, ClientResponse>> {
-        Box::new(Self::new(self.clients.clone(), self.hlc.clone()))
+        Box::new(Self::new(
+            self.connection_registry.box_clone(),
+            self.hlc.clone(),
+        ))
     }
 }
 
@@ -205,10 +218,10 @@ impl ClientServer {
         node_id: Uuid,
         core_id: Uuid,
         local_ip: Ipv4Addr,
-        clients: Arc<Mutex<MessageClients>>,
+        connection_registry: ConnectionRegistry<ServerRequest, ServerResponse>,
     ) -> Result<Self, ServerError> {
         let hlc = Arc::new(Mutex::new(uhlc::HLC::default()));
-        let handler = ClientHandler::new(clients, hlc);
+        let handler = ClientHandler::new(connection_registry, hlc);
         let server = Server::new(handler)?;
 
         println!("Starting Client Server on Port: {}", server.port);

@@ -33,8 +33,8 @@ fn criterion_benchmark(c: &mut Criterion) {
         .collect::<Vec<_>>();
 
     let connection = rt.block_on(async {
-        let client = QuicClient::<ClientRequest, ClientResponse>::new().unwrap();
-        let connection = client.connection(addr).await.unwrap();
+        let client = QuicClient::<ClientRequest, ClientResponse>::new(addr).unwrap();
+        let connection = client.connection().await.unwrap();
         connection
     });
 
