@@ -6,8 +6,8 @@ use crate::{
 use async_trait::async_trait;
 use db::DBValue;
 use net::{
+    channel::ChannelClient,
     quic::{Handler, Server, ServerError},
-    ChannelClient,
 };
 use std::net::Ipv4Addr;
 use tokio::{
