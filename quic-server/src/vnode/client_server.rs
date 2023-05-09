@@ -4,13 +4,11 @@ use crate::{
     vnode::{client_mdns::ClientMDNS, VNodeId},
 };
 use async_trait::async_trait;
+use futures::{channel::mpsc, SinkExt};
 use net::quic::{Handler, Server, ServerError};
 use quic_client::protocol::{ClientRequest, ClientResponse};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
-use tokio::{
-    sync::{mpsc, Mutex},
-    task::JoinSet,
-};
+use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
@@ -43,7 +41,7 @@ impl Handler<ClientRequest, ClientResponse> for ClientHandler {
     async fn call(
         &mut self,
         req: ClientRequest,
-        send_tx: mpsc::Sender<ClientResponse>,
+        mut send_tx: mpsc::Sender<ClientResponse>,
     ) -> Result<(), ServerError> {
         let mut join_set: JoinSet<Result<(VNodeId, ServerResponse), ServerError>> = JoinSet::new();
         let req_key = req.key().clone();
@@ -168,7 +166,7 @@ impl Handler<ClientRequest, ClientResponse> for ClientHandler {
                             error: "Results did not match".to_string(),
                         };
 
-                        send_tx.send(res).await.expect("channel should be open");
+                        send_tx.try_send(res).expect("channel should be open");
                         result_sent = true;
 
                         event!(Level::ERROR, results = ?results, "Results did not match");

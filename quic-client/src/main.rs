@@ -2,6 +2,7 @@ mod mdns;
 mod protocol;
 
 use env_logger::Env;
+use futures::{channel::mpsc::channel, StreamExt};
 use net::{quic::QuicClient, Client};
 use protocol::{ClientRequest, ClientResponse};
 use std::{
@@ -9,7 +10,6 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use tokio::sync::mpsc::channel;
 
 pub mod client_capnp {
     include!(concat!(env!("OUT_DIR"), "/client_capnp.rs"));
@@ -36,14 +36,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Client Ready");
 
-    let (tx, mut rx) = channel::<ClientRequest>(1);
+    let (mut tx, mut rx) = channel::<ClientRequest>(1);
 
     let cli = thread::spawn(move || {
         for line in std::io::stdin().lines() {
             let hlc = hlc.clone();
             match handle_input_line(hlc, line.unwrap()) {
                 Some(req) => {
-                    tx.blocking_send(req).unwrap();
+                    tx.try_send(req).unwrap();
                 }
                 None => (),
             }
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tokio::spawn(async move {
         loop {
-            if let Some(req) = rx.recv().await {
+            if let Some(req) = rx.next().await {
                 let response: ClientResponse = stream.request(req).await.unwrap().into();
                 println!("Response: {:?}", response);
             }

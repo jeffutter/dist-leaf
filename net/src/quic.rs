@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{channel::mpsc, StreamExt};
 use s2n_quic::{
     client::Connect, connection::Handle, stream::BidirectionalStream, Client as QClient,
     Connection as QConnection, Server as QServer,
@@ -10,7 +10,6 @@ use std::{
     net::SocketAddr,
 };
 use thiserror::Error;
-use tokio::sync::mpsc;
 use tracing::instrument;
 
 use crate::{
@@ -262,7 +261,7 @@ where
         let (send_tx, mut send_rx): (mpsc::Sender<Res>, mpsc::Receiver<Res>) = mpsc::channel(100);
 
         tokio::spawn(async move {
-            while let Some(data) = send_rx.recv().await {
+            while let Some(data) = send_rx.next().await {
                 let encoded = data.encode();
                 send_stream.send(encoded).await?;
             }

@@ -1,6 +1,9 @@
 use async_trait::async_trait;
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
+};
 use std::{fmt::Debug, marker::Send};
-use tokio::sync::{mpsc, oneshot};
 use tracing::instrument;
 
 use crate::{Client, Connection, MessageClient, TransportError};

@@ -5,15 +5,15 @@ use crate::{
 };
 use async_trait::async_trait;
 use db::DBValue;
+use futures::{
+    channel::{mpsc, oneshot},
+    select, FutureExt, SinkExt, StreamExt,
+};
 use net::{
     channel::ChannelClient,
     quic::{Handler, Server, ServerError},
 };
 use std::net::Ipv4Addr;
-use tokio::{
-    select,
-    sync::{mpsc, oneshot},
-};
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -35,7 +35,7 @@ impl Handler<ServerRequest, ServerResponse> for ServerHandler {
     async fn call(
         &mut self,
         req: ServerRequest,
-        send_tx: mpsc::Sender<ServerResponse>,
+        mut send_tx: mpsc::Sender<ServerResponse>,
     ) -> Result<(), ServerError> {
         let res = S2SServer::handle_local(req, self.storage.clone()).await?;
         send_tx.send(res).await.expect("stream should be open");
@@ -125,22 +125,29 @@ impl S2SServer {
     pub(crate) async fn run(&mut self) -> Result<(), ServerError> {
         loop {
             let storage = self.storage.clone();
+            let mut run = Box::pin(self.server.run()).fuse();
 
             select! {
                 // Server
-                Ok(()) = self.server.run() => { },
+                _ = run => {},
                 // Channel
-                Some((req, tx)) = self.rx.recv() => {
-                    // Intentionally don't check for errors/unrwrap as `tx` may have been
-                    // closed by the other end if the request has already been filled
-                    #[allow(unused_must_use)]
-                    tokio::spawn(async move {
-                        let res = Self::handle_local(req, storage).await?;
-                        tx.send(res);
+                x = self.rx.next() => {
+                    match x {
+                        Some((req, tx)) => {
+                            // Intentionally don't check for errors/unrwrap as `tx` may have been
+                            // closed by the other end if the request has already been filled
+                            #[allow(unused_must_use)]
+                            tokio::spawn(async move {
+                                let res = Self::handle_local(req, storage).await?;
+                                tx.send(res);
 
-                        Ok::<(), ServerError>(())
-                    });
-                }
+                                Ok::<(), ServerError>(())
+                            });
+
+                            },
+                        None => { }
+                    }
+                },
             }
         }
     }
