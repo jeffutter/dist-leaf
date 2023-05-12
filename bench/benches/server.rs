@@ -7,7 +7,7 @@ use env_logger::Env;
 use itertools::Itertools;
 use net::quic::QuicClient;
 use net::Client;
-use quic_client::protocol::{ClientRequest, ClientResponse};
+use client::protocol::{ClientRequest, ClientResponse};
 use rand::seq::SliceRandom;
 use tokio::runtime::{self, Handle};
 

@@ -6,7 +6,7 @@ use crate::{
 use async_trait::async_trait;
 use futures::{channel::mpsc, SinkExt};
 use net::quic::{Handler, Server, ServerError};
-use quic_client::protocol::{ClientRequest, ClientResponse};
+use client::protocol::{ClientRequest, ClientResponse};
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
 use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{event, instrument, Level};

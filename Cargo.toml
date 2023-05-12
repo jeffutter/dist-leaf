@@ -1,8 +1,8 @@
 [workspace]
 members = [
   "bench",
-  "quic-server",
-  "quic-client",
+  "server",
+  "client",
   "net",
   "db"
 ]

@@ -1,5 +1,5 @@
 [package]
-name = "quic-server"
+name = "server"
 version = "0.1.0"
 edition = "2021"
 
@@ -20,7 +20,7 @@ futures = "0.3"
 env_logger = "0.10"
 db = { path = "../db" }
 net = { path = "../net" }
-quic-client = { path = "../quic-client" }
+client = { path = "../client" }
 capnp = "0.16"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3"
