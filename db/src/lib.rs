@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use thiserror::Error;
 use tracing::instrument;
+use xxhash_rust::xxh3::Xxh3;
 
 #[derive(Error, Debug)]
 pub enum DatabaseError {
@@ -18,13 +19,19 @@ pub enum DatabaseError {
 pub struct DBValue<'data> {
     pub ts: uhlc::Timestamp,
     pub data: Cow<'data, str>,
+    pub digest: u64,
 }
 
 impl<'a> DBValue<'a> {
     pub fn new(data: &'a str, ts: uhlc::Timestamp) -> Self {
+        let mut hasher = Xxh3::new();
+        hasher.update(ts.get_id().as_slice());
+        hasher.update(&ts.get_time().as_u64().to_le_bytes());
+        hasher.update(data.as_bytes());
         Self {
             ts,
             data: Cow::Borrowed(data),
+            digest: hasher.digest(),
         }
     }
 }

@@ -96,12 +96,33 @@ impl S2SServer {
                 let res = match result {
                     Some(data) => ServerResponse::Result {
                         request_id,
+                        digest: Some(data.digest),
                         data_id: Some(data.ts),
                         result: Some(data.data.to_string()),
                     },
                     None => ServerResponse::Result {
                         request_id,
+                        digest: None,
                         data_id: None,
+                        result: None,
+                    },
+                };
+                Ok(res)
+            }
+            ServerRequest::Digest { request_id, key } => {
+                // TODO: fix this error type
+                let result = storage.get(&key).map_err(|_| ServerError::Unknown)?;
+                let res = match result {
+                    Some(data) => ServerResponse::Result {
+                        request_id,
+                        data_id: Some(data.ts),
+                        digest: Some(data.digest),
+                        result: None,
+                    },
+                    None => ServerResponse::Result {
+                        request_id,
+                        data_id: None,
+                        digest: None,
                         result: None,
                     },
                 };

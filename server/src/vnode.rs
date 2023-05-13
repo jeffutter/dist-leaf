@@ -91,11 +91,36 @@ impl MessageClient<ServerRequest, ServerResponse> for LocalMessageClient {
                     Some(data) => ServerResponse::Result {
                         request_id,
                         data_id: Some(data.ts),
+                        digest: Some(data.digest),
                         result: Some(data.data.to_string()),
                     },
                     None => ServerResponse::Result {
                         request_id,
                         data_id: None,
+                        digest: None,
+                        result: None,
+                    },
+                };
+
+                Ok(res)
+            }
+            ServerRequest::Digest { request_id, key } => {
+                let res_data = self
+                    .storage
+                    .get(&key)
+                    .map_err(|e| TransportError::UnknownMsg(e.to_string()))?;
+
+                let res = match res_data {
+                    Some(data) => ServerResponse::Result {
+                        request_id,
+                        data_id: Some(data.ts),
+                        digest: Some(data.digest),
+                        result: None,
+                    },
+                    None => ServerResponse::Result {
+                        request_id,
+                        data_id: None,
+                        digest: None,
                         result: None,
                     },
                 };

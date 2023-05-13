@@ -23,6 +23,10 @@ pub enum ServerRequest {
         request_id: uhlc::Timestamp,
         key: String,
     },
+    Digest {
+        request_id: uhlc::Timestamp,
+        key: String,
+    },
     Put {
         request_id: uhlc::Timestamp,
         key: String,
@@ -34,6 +38,7 @@ impl ServerRequest {
     pub fn key(&self) -> &String {
         match self {
             ServerRequest::Get { key, .. } => key,
+            ServerRequest::Digest { key, .. } => key,
             ServerRequest::Put { key, .. } => key,
         }
     }
@@ -41,6 +46,7 @@ impl ServerRequest {
     pub fn request_id(&self) -> &uhlc::Timestamp {
         match self {
             ServerRequest::Get { request_id, .. } => request_id,
+            ServerRequest::Digest { request_id, .. } => request_id,
             ServerRequest::Put { request_id, .. } => request_id,
         }
     }
@@ -58,6 +64,11 @@ impl Encode for ServerRequest {
                 res.set_request_id(&request_id.to_string());
                 let mut get = res.init_get();
                 get.set_key(&key);
+            }
+            ServerRequest::Digest { request_id, key } => {
+                res.set_request_id(&request_id.to_string());
+                let mut digest = res.init_digest();
+                digest.set_key(&key);
             }
             ServerRequest::Put {
                 request_id,
@@ -107,6 +118,14 @@ impl Decode for ServerRequest {
 
                 Ok(ServerRequest::Get { request_id, key })
             }
+            server_capnp::request::Which::Digest(digest_request) => {
+                let key = digest_request
+                    .get_key()
+                    .map_err(|_e| TransportError::Unknown)?
+                    .to_string();
+
+                Ok(ServerRequest::Digest { request_id, key })
+            }
             server_capnp::request::Which::Put(put_request) => {
                 let key = put_request
                     .get_key()
@@ -137,6 +156,7 @@ pub enum ServerResponse {
     Result {
         request_id: uhlc::Timestamp,
         data_id: Option<uhlc::Timestamp>,
+        digest: Option<u64>,
         result: Option<String>,
     },
     Ok {
@@ -158,6 +178,7 @@ impl Encode for ServerResponse {
             }
             ServerResponse::Result {
                 request_id,
+                digest: Some(digest),
                 data_id: Some(data_id),
                 result: Some(data),
             } => {
@@ -165,25 +186,18 @@ impl Encode for ServerResponse {
                 let mut result = res.init_result();
                 result.set_value(&data);
                 result.set_data_id(&data_id.to_string());
+                result.set_digest(*digest);
             }
             ServerResponse::Result {
                 request_id,
+                digest: None,
                 data_id: None,
                 result: None,
             } => {
                 res.set_request_id(&request_id.to_string());
                 res.init_result();
             }
-            ServerResponse::Result {
-                data_id: Some(_),
-                result: None,
-                ..
-            } => unreachable!(),
-            ServerResponse::Result {
-                data_id: None,
-                result: Some(_),
-                ..
-            } => unreachable!(),
+            ServerResponse::Result { .. } => unreachable!(),
             ServerResponse::Ok { request_id } => {
                 res.set_request_id(&request_id.to_string());
                 res.init_ok();
@@ -230,9 +244,12 @@ impl Decode for ServerResponse {
                     .parse()
                     .map_err(|_e| TransportError::Unknown)?;
 
+                let digest = result.get_digest();
+
                 // Null Result?
                 Ok(ServerResponse::Result {
                     request_id,
+                    digest: Some(digest),
                     data_id: Some(data_id),
                     result: Some(value),
                 })

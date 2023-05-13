@@ -55,10 +55,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let node_id = Uuid::new_v4();
             shared_db.put(
                 "node_id",
-                &db::DBValue {
-                    ts: hlc.new_timestamp(),
-                    data: node_id.to_string().into(),
-                },
+                &db::DBValue::new(&node_id.to_string(), hlc.new_timestamp()),
             )?;
             node_id
         }
@@ -82,10 +79,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         shared_db
                             .put(
                                 &id_key,
-                                &db::DBValue {
-                                    ts: hlc.new_timestamp(),
-                                    data: core_id.to_string().into(),
-                                },
+                                &db::DBValue::new(&core_id.to_string(), hlc.new_timestamp()),
                             )
                             .unwrap();
                         core_id

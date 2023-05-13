@@ -7,9 +7,12 @@ struct Request {
     get :group {
       key @1 :Text;
     }
-    put :group {
+    digest :group {
       key @2 :Text;
-      value @3 :Text;
+    }
+    put :group {
+      key @3 :Text;
+      value @4 :Text;
     }
   }
 }
@@ -19,14 +22,15 @@ struct Response {
 
   union {
     result :group {
-      value @1 :Text;
-      dataId @2 :Text;
+      dataId @1 :Text;
+      digest @2 :UInt64;
+      value @3 :Text;
     }
     ok :group {
-      ok @3 :Void;
+      ok @4 :Void;
     }
     error :group {
-      message @4 :Text;
+      message @5 :Text;
     }
   }
 }
