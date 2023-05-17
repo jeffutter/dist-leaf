@@ -1,6 +1,6 @@
-use std::{borrow::Cow, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
-use rocksdb::DB;
+use rocksdb::TransactionDB;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use thiserror::Error;
@@ -16,35 +16,48 @@ pub enum DatabaseError {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct DBValue<'data> {
+pub struct DBValue {
     pub ts: uhlc::Timestamp,
-    pub data: Cow<'data, str>,
+    pub data: String,
     pub digest: u64,
 }
 
-impl<'a> DBValue<'a> {
-    pub fn new(data: &'a str, ts: uhlc::Timestamp) -> Self {
+impl DBValue {
+    pub fn new(data: &str, ts: uhlc::Timestamp) -> Self {
         let mut hasher = Xxh3::new();
         hasher.update(ts.get_id().as_slice());
         hasher.update(&ts.get_time().as_u64().to_le_bytes());
         hasher.update(data.as_bytes());
         Self {
             ts,
-            data: Cow::Borrowed(data),
+            data: data.to_string(),
             digest: hasher.digest(),
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Database {
-    db: Arc<DB>,
+    db: Arc<TransactionDB>,
+    path: std::path::PathBuf,
+}
+
+impl Debug for Database {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database")
+            .field("path", &self.path)
+            .finish()
+    }
 }
 
 impl Database {
     pub fn new(path: &std::path::Path) -> Self {
-        let db = DB::open_default(path).unwrap();
-        Self { db: Arc::new(db) }
+        let db = TransactionDB::open_default(path).unwrap();
+
+        Self {
+            db: Arc::new(db),
+            path: path.to_path_buf(),
+        }
     }
 
     pub fn new_tmp() -> Self {
@@ -55,9 +68,22 @@ impl Database {
 
     #[instrument]
     pub fn put(&self, key: &str, value: &DBValue) -> Result<(), DatabaseError> {
-        let encoded: Vec<u8> = bincode::serialize(&value).unwrap();
-        self.db.put(key.as_bytes(), encoded)?;
+        let key = key.as_bytes();
+        let tx = self.db.transaction();
+        let old_val = tx.get_for_update(key, true)?;
 
+        if let Some(encoded) = old_val {
+            let decoded: DBValue = bincode::deserialize(&encoded).unwrap();
+
+            if value.ts < decoded.ts {
+                tx.rollback()?;
+                return Ok(());
+            }
+        }
+
+        let encoded: Vec<u8> = bincode::serialize(value).unwrap();
+        tx.put(key, encoded)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -66,7 +92,7 @@ impl Database {
         match self.db.get(key.as_bytes())? {
             Some(v) => {
                 let decoded: DBValue = bincode::deserialize(&v).unwrap();
-                Ok(Some(decoded.clone()))
+                Ok(Some(decoded))
             }
             None => Ok(None),
         }
@@ -90,9 +116,30 @@ impl Database {
     }
 
     #[instrument]
-    pub fn delete(&self, key: &str) -> Result<(), DatabaseError> {
-        self.db.delete(key.as_bytes())?;
-        Ok(())
+    pub fn delete(&self, key: &str, ts: uhlc::Timestamp) -> Result<(), DatabaseError> {
+        let key = key.as_bytes();
+        let tx = self.db.transaction();
+        let old_val = tx.get_for_update(key, true)?;
+        match old_val {
+            None => {
+                tx.rollback()?;
+                Ok(())
+            }
+            Some(encoded) => {
+                let decoded: DBValue = bincode::deserialize(&encoded).unwrap();
+                match decoded {
+                    DBValue { ts: old_ts, .. } if old_ts >= ts => {
+                        tx.rollback()?;
+                        Ok(())
+                    }
+                    _ => {
+                        tx.delete(key)?;
+                        tx.commit()?;
+                        Ok(())
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -115,5 +162,109 @@ mod tests {
 
         assert_eq!(db_value.ts, res.ts);
         assert_eq!(db_value.data, res.data);
+    }
+
+    #[test]
+    fn writing_new_ts_updates() {
+        let db = Database::new_tmp();
+        let hlc = uhlc::HLC::default();
+
+        let old_ts = hlc.new_timestamp();
+        let new_ts = hlc.new_timestamp();
+
+        let key = "key";
+
+        let old_value = "old";
+        let new_value = "new";
+
+        let old_db_value = DBValue::new(old_value, old_ts);
+        let new_db_value = DBValue::new(new_value, new_ts);
+
+        db.put(key, &old_db_value).unwrap();
+        db.put(key, &new_db_value).unwrap();
+
+        let res = db.get(key).unwrap().unwrap();
+
+        assert_eq!(new_ts, res.ts);
+        assert_eq!(new_value, res.data);
+    }
+
+    #[test]
+    fn writing_old_ts_doesnt_update() {
+        let db = Database::new_tmp();
+        let hlc = uhlc::HLC::default();
+
+        let old_ts = hlc.new_timestamp();
+        let new_ts = hlc.new_timestamp();
+
+        let key = "key";
+
+        let old_value = "old";
+        let new_value = "new";
+
+        let old_db_value = DBValue::new(old_value, old_ts);
+        let new_db_value = DBValue::new(new_value, new_ts);
+
+        db.put(key, &new_db_value).unwrap();
+        db.put(key, &old_db_value).unwrap();
+
+        let res = db.get(key).unwrap().unwrap();
+
+        assert_eq!(new_ts, res.ts);
+        assert_eq!(new_value, res.data);
+    }
+
+    #[test]
+    fn deleting_merge() {
+        let db = Database::new_tmp();
+        let hlc = uhlc::HLC::default();
+
+        let old_ts = hlc.new_timestamp();
+        let delete_ts = hlc.new_timestamp();
+        let new_ts = hlc.new_timestamp();
+
+        let key = "key";
+
+        let old_value = "old";
+        let new_value = "new";
+
+        let old_db_value = DBValue::new(old_value, old_ts);
+        let new_db_value = DBValue::new(new_value, new_ts);
+
+        db.put(key, &old_db_value).unwrap();
+        db.delete(key, delete_ts).unwrap();
+        db.put(key, &new_db_value).unwrap();
+
+        let res = db.get(key).unwrap().unwrap();
+
+        assert_eq!(new_ts, res.ts);
+        assert_eq!(new_value, res.data);
+    }
+
+    #[test]
+    fn delete_with_old_timestamp_doesnt_delete() {
+        let db = Database::new_tmp();
+        let hlc = uhlc::HLC::default();
+
+        let old_ts = hlc.new_timestamp();
+        let delete_ts = hlc.new_timestamp();
+        let new_ts = hlc.new_timestamp();
+
+        let key = "key";
+
+        let old_value = "old";
+        let new_value = "new";
+
+        let old_db_value = DBValue::new(old_value, old_ts);
+        let new_db_value = DBValue::new(new_value, new_ts);
+
+        db.put(key, &old_db_value).unwrap();
+        db.put(key, &new_db_value).unwrap();
+        db.delete(key, delete_ts).unwrap();
+
+        let res = db.get(key).unwrap().unwrap();
+
+        assert_eq!(new_ts, res.ts);
+        assert_eq!(new_value, res.data);
     }
 }

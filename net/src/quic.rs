@@ -34,6 +34,8 @@ pub enum ServerError {
     Unknown,
     #[error("initialization error: {}", .0)]
     Initialization(String),
+    #[error("unknown server error: {}", .0)]
+    UnknownWithMessage(String),
     #[error("response error: {}", .0)]
     Response(String),
 }

@@ -13,7 +13,7 @@ use net::{
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
 use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{event, instrument, Level};
-use uhlc::Timestamp;
+use uhlc::{Timestamp, HLC};
 use uuid::Uuid;
 
 static REPLICATION_FACTOR: usize = 3;
@@ -47,6 +47,7 @@ async fn put(
         Box<dyn MessageClient<ServerRequest, ServerResponse>>,
     )>,
     local_request_id: Timestamp,
+    hlc: &mut HLC,
 ) -> Result<(), ServerError> {
     let client_request_id = req.request_id().clone();
     let mut join_set: JoinSet<Result<(VNodeId, ServerResponse), ServerError>> = JoinSet::new();
@@ -103,6 +104,11 @@ async fn put(
                         ServerResponse::Result { .. } => unreachable!(),
                     };
 
+                    // Update HLC
+                    // Only on accepted read, may need to do this more often though
+                    hlc.update_with_timestamp(&r.request_id())
+                        .map_err(|e| ServerError::UnknownWithMessage(e.to_string()))?;
+
                     send_tx.send(response).await.expect("channel sould be open");
 
                     result_sent = true;
@@ -158,8 +164,11 @@ async fn digest_get(
         Box<dyn MessageClient<ServerRequest, ServerResponse>>,
     )>,
     local_request_id: Timestamp,
+    hlc: &mut HLC,
     mut connection_registry: ConnectionRegistry<ServerRequest, ServerResponse>,
 ) -> Result<(), ServerError> {
+    // TODO: clean this whole dang thing up and double-check repair logic
+
     let client_request_id = req.request_id().clone();
     let req_key = req.key().clone();
     let mut join_set: JoinSet<Result<(VNodeId, ServerResponse), ServerError>> = JoinSet::new();
@@ -260,6 +269,11 @@ async fn digest_get(
                     ServerResponse::Error { .. } => unreachable!(),
                 };
 
+                // Update HLC
+                // Only on accepted read, may need to do this more often though
+                hlc.update_with_timestamp(response.request_id())
+                    .map_err(|e| ServerError::UnknownWithMessage(e.to_string()))?;
+
                 send_tx
                     .send(client_response)
                     .await
@@ -317,6 +331,79 @@ async fn digest_get(
 
             event!(Level::ERROR, response = ?response, digests =? digests, "Results did not match");
 
+            let requests = replicas.iter().map(|(vnode_id, connection)| {
+                let vnode_id = vnode_id.clone();
+                let digest_request = digest_request.clone();
+                let mut connection = connection.box_clone();
+
+                tokio::spawn({
+                    async move {
+                        let res = connection.request(digest_request).await?;
+
+                        Ok::<_, ServerError>((vnode_id, res))
+                    }
+                })
+            });
+
+            let results = futures::future::join_all(requests).await;
+
+            let newest = results
+                .iter()
+                .filter_map(|res| {
+                    res.as_ref()
+                        .map(|x| x.as_ref().ok())
+                        .ok()
+                        .flatten()
+                        .map(|(_, r)| match r {
+                            ServerResponse::Error { .. } => None,
+                            ServerResponse::Result { .. } => Some(r),
+                            ServerResponse::Ok { .. } => None,
+                        })
+                        .flatten()
+                })
+                .max_by_key(|res| res.request_id());
+
+            // TODO: What if newest is deleted?
+            let repair = match newest {
+                Some(ServerResponse::Result {
+                    data_id: Some(data_id),
+                    result: Some(result),
+                    ..
+                }) => ServerRequest::Put {
+                    request_id: data_id.clone(),
+                    key: req_key,
+                    value: result.clone(),
+                },
+                Some(ServerResponse::Result {
+                    request_id,
+                    data_id: None,
+                    result: None,
+                    ..
+                }) => ServerRequest::Delete {
+                    request_id: request_id.clone(),
+                    key: req_key,
+                },
+                Some(_) => unreachable!(),
+                None => ServerRequest::Delete {
+                    request_id: client_request_id,
+                    key: req_key,
+                },
+            };
+
+            for (vnode_id, connection) in replicas.iter() {
+                let vnode_id = vnode_id.clone();
+                let repair = repair.clone();
+                let mut connection = connection.box_clone();
+
+                tokio::spawn({
+                    async move {
+                        let res = connection.request(repair).await?;
+
+                        Ok::<_, ServerError>((vnode_id, res))
+                    }
+                });
+            }
+
             break;
         }
     }
@@ -350,15 +437,19 @@ impl Handler<ClientRequest, ClientResponse> for ClientHandler {
         event!(Level::INFO, "Fetching {:?} from: {:?}", req, replicas);
 
         let local_request_id = self.hlc.lock().await.new_timestamp();
+        let mut hlc = self.hlc.lock().await;
 
         match req {
-            ClientRequest::Put { .. } => put(req, send_tx, replicas, local_request_id).await,
+            ClientRequest::Put { .. } => {
+                put(req, send_tx, replicas, local_request_id, &mut hlc).await
+            }
             ClientRequest::Get { .. } => {
                 digest_get(
                     req,
                     send_tx,
                     replicas,
                     local_request_id,
+                    &mut hlc,
                     self.connection_registry.box_clone(),
                 )
                 .await

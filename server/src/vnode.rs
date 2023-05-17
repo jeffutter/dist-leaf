@@ -141,7 +141,7 @@ impl MessageClient<ServerRequest, ServerResponse> for LocalMessageClient {
             ServerRequest::Delete { request_id, key } => {
                 // TODO: might need to check that request_id is older than saved
                 self.storage
-                    .delete(&key)
+                    .delete(&key, request_id)
                     .map_err(|e| TransportError::UnknownMsg(e.to_string()))?;
                 let res = ServerResponse::Ok { request_id };
                 Ok(res)

@@ -183,6 +183,16 @@ pub enum ServerResponse {
     },
 }
 
+impl ServerResponse {
+    pub fn request_id(&self) -> &uhlc::Timestamp {
+        match self {
+            ServerResponse::Error { request_id, .. } => request_id,
+            ServerResponse::Result { request_id, .. } => request_id,
+            ServerResponse::Ok { request_id, .. } => request_id,
+        }
+    }
+}
+
 impl Encode for ServerResponse {
     #[instrument]
     fn encode(&self) -> Bytes {
