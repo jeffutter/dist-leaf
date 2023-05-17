@@ -140,6 +140,13 @@ impl S2SServer {
                 let res = ServerResponse::Ok { request_id };
                 Ok(res)
             }
+            ServerRequest::Delete { request_id, key } => {
+                // TODO: fix this error type
+                // TODO: might need to check that request_id is older than saved
+                storage.delete(&key).map_err(|_| ServerError::Unknown)?;
+                let res = ServerResponse::Ok { request_id };
+                Ok(res)
+            }
         }
     }
 

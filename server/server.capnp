@@ -14,6 +14,9 @@ struct Request {
       key @3 :Text;
       value @4 :Text;
     }
+    delete :group {
+      key @5 :Text;
+    }
   }
 }
 

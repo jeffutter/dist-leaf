@@ -11,7 +11,7 @@ use net::{
     MessageClient, TransportError,
 };
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
-use tokio::{select, spawn, sync::Mutex, task::JoinSet};
+use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{event, instrument, Level};
 use uhlc::Timestamp;
 use uuid::Uuid;
@@ -150,7 +150,7 @@ async fn put(
     Ok(())
 }
 
-async fn get(
+async fn digest_get(
     req: ClientRequest,
     mut send_tx: mpsc::Sender<ClientResponse>,
     replicas: Vec<(
@@ -158,6 +158,7 @@ async fn get(
         Box<dyn MessageClient<ServerRequest, ServerResponse>>,
     )>,
     local_request_id: Timestamp,
+    mut connection_registry: ConnectionRegistry<ServerRequest, ServerResponse>,
 ) -> Result<(), ServerError> {
     let client_request_id = req.request_id().clone();
     let req_key = req.key().clone();
@@ -172,7 +173,7 @@ async fn get(
 
     let digest_request = ServerRequest::Digest {
         request_id: local_request_id,
-        key: req_key,
+        key: req_key.clone(),
     };
 
     //
@@ -248,7 +249,9 @@ async fn get(
 
         if let Some(Ok(ServerResponse::Result { digest, .. })) = response {
             if digests.get(&digest).unwrap_or(&(0usize, Vec::new())).0 >= CONSISTENCY_LEVEL {
-                let response = match response.unwrap().unwrap() {
+                let response = response.unwrap().unwrap();
+
+                let client_response = match response.clone() {
                     ServerResponse::Result { result, .. } => ClientResponse::Result {
                         request_id: client_request_id,
                         result,
@@ -257,7 +260,43 @@ async fn get(
                     ServerResponse::Error { .. } => unreachable!(),
                 };
 
-                send_tx.send(response).await.expect("channel sould be open");
+                send_tx
+                    .send(client_response)
+                    .await
+                    .expect("channel sould be open");
+
+                digests.remove(&digest);
+
+                let bad_nodes: Vec<VNodeId> = digests
+                    .into_values()
+                    .flat_map(|(_, nodes)| nodes.into_iter())
+                    .collect();
+
+                if let ServerResponse::Result {
+                    data_id: Some(data_id),
+                    result,
+                    ..
+                } = response
+                {
+                    let repair = match result {
+                        Some(value) => ServerRequest::Put {
+                            request_id: data_id,
+                            key: req_key,
+                            value,
+                        },
+                        None => ServerRequest::Delete {
+                            request_id: data_id,
+                            key: req_key,
+                        },
+                    };
+
+                    for vnode_id in bad_nodes {
+                        if let Some(mut client) = connection_registry.stream(&vnode_id).await? {
+                            // TODO: Maybe handle errors?
+                            let _ = client.request(repair.clone());
+                        }
+                    }
+                }
 
                 result_sent = true;
 
@@ -266,6 +305,8 @@ async fn get(
         }
 
         if received_responses >= REPLICATION_FACTOR {
+            // TODO: Repair all nodes
+
             let res = ClientResponse::Error {
                 request_id: client_request_id,
                 error: "Results did not match".to_string(),
@@ -312,7 +353,16 @@ impl Handler<ClientRequest, ClientResponse> for ClientHandler {
 
         match req {
             ClientRequest::Put { .. } => put(req, send_tx, replicas, local_request_id).await,
-            ClientRequest::Get { .. } => get(req, send_tx, replicas, local_request_id).await,
+            ClientRequest::Get { .. } => {
+                digest_get(
+                    req,
+                    send_tx,
+                    replicas,
+                    local_request_id,
+                    self.connection_registry.box_clone(),
+                )
+                .await
+            }
         }
     }
 

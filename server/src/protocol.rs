@@ -32,6 +32,10 @@ pub enum ServerRequest {
         key: String,
         value: String,
     },
+    Delete {
+        request_id: uhlc::Timestamp,
+        key: String,
+    },
 }
 
 impl ServerRequest {
@@ -40,6 +44,7 @@ impl ServerRequest {
             ServerRequest::Get { key, .. } => key,
             ServerRequest::Digest { key, .. } => key,
             ServerRequest::Put { key, .. } => key,
+            ServerRequest::Delete { key, .. } => key,
         }
     }
 
@@ -48,6 +53,7 @@ impl ServerRequest {
             ServerRequest::Get { request_id, .. } => request_id,
             ServerRequest::Digest { request_id, .. } => request_id,
             ServerRequest::Put { request_id, .. } => request_id,
+            ServerRequest::Delete { request_id, .. } => request_id,
         }
     }
 }
@@ -79,6 +85,11 @@ impl Encode for ServerRequest {
                 let mut put = res.init_put();
                 put.set_key(&key);
                 put.set_value(&value);
+            }
+            ServerRequest::Delete { request_id, key } => {
+                res.set_request_id(&request_id.to_string());
+                let mut put = res.init_put();
+                put.set_key(&key);
             }
         }
 
@@ -142,6 +153,14 @@ impl Decode for ServerRequest {
                     key,
                     value,
                 })
+            }
+            server_capnp::request::Which::Delete(delete_request) => {
+                let key = delete_request
+                    .get_key()
+                    .map_err(|_e| TransportError::Unknown)?
+                    .to_string();
+
+                Ok(ServerRequest::Delete { request_id, key })
             }
         }
     }
