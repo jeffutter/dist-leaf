@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
-capnp = "0.16"
+capnp = "0.17"
 clap = { version = "4.2", features = ["derive"] }
 client = { path = "../client" }
 consistent_hash_ring = "0.8.0"
@@ -30,4 +30,4 @@ uhlc = "0.5"
 uuid = { version = "1.3.0", features = ["v4", "fast-rng"]}
 
 [build-dependencies]
-capnpc = "0.16"
+capnpc = "0.17"
