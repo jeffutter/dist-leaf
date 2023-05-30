@@ -14,7 +14,6 @@ use tracing::instrument;
 pub mod channel;
 pub mod quic;
 pub mod tcp;
-mod tokio_adapter;
 
 #[derive(Error, Debug)]
 pub enum TransportError {
