@@ -190,18 +190,23 @@ impl Decode for ClientResponse {
             .map_err(|_e| TransportError::Unknown)?;
 
         match response.which().map_err(|_e| TransportError::Unknown)? {
-            client_capnp::response::Which::Result(result) => {
-                let value = result
-                    .get_value()
-                    .map_err(|_e| TransportError::Unknown)?
-                    .to_string();
+            client_capnp::response::Which::Result(result) => match result.has_value() {
+                true => {
+                    let value = result
+                        .get_value()
+                        .map_err(|_e| TransportError::Unknown)?
+                        .to_string();
 
-                // Null Result?
-                Ok(ClientResponse::Result {
+                    Ok(ClientResponse::Result {
+                        request_id,
+                        result: Some(value),
+                    })
+                }
+                false => Ok(ClientResponse::Result {
                     request_id,
-                    result: Some(value),
-                })
-            }
+                    result: None,
+                }),
+            },
             client_capnp::response::Which::Ok(_) => Ok(ClientResponse::Ok(request_id)),
             client_capnp::response::Which::Error(result) => {
                 let error = result

@@ -261,28 +261,45 @@ impl Decode for ServerResponse {
             .map_err(|_e| TransportError::Unknown)?;
 
         match response.which().map_err(|_e| TransportError::Unknown)? {
-            server_capnp::response::Which::Result(result) => {
-                let value = result
-                    .get_value()
-                    .map_err(|_e| TransportError::Unknown)?
-                    .to_string();
+            server_capnp::response::Which::Result(result) => match result.has_value() {
+                true => {
+                    let value = result
+                        .get_value()
+                        .map_err(|_e| TransportError::Unknown)?
+                        .to_string();
 
-                let data_id = result
-                    .get_data_id()
-                    .map_err(|_e| TransportError::Unknown)?
-                    .parse()
-                    .map_err(|_e| TransportError::Unknown)?;
+                    let data_id = result
+                        .get_data_id()
+                        .map_err(|_e| TransportError::Unknown)?
+                        .parse()
+                        .map_err(|_e| TransportError::Unknown)?;
 
-                let digest = result.get_digest();
+                    let digest = result.get_digest();
 
-                // Null Result?
-                Ok(ServerResponse::Result {
-                    request_id,
-                    digest: Some(digest),
-                    data_id: Some(data_id),
-                    result: Some(value),
-                })
-            }
+                    Ok(ServerResponse::Result {
+                        request_id,
+                        digest: Some(digest),
+                        data_id: Some(data_id),
+                        result: Some(value),
+                    })
+                }
+                false => {
+                    let data_id = result
+                        .get_data_id()
+                        .map_err(|_e| TransportError::Unknown)?
+                        .parse()
+                        .map_err(|_e| TransportError::Unknown)?;
+
+                    let digest = result.get_digest();
+
+                    Ok(ServerResponse::Result {
+                        request_id,
+                        digest: Some(digest),
+                        data_id: Some(data_id),
+                        result: None,
+                    })
+                }
+            },
             server_capnp::response::Which::Ok(_) => Ok(ServerResponse::Ok { request_id }),
             server_capnp::response::Which::Error(result) => {
                 let error = result
