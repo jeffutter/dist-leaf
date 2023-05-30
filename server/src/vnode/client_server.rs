@@ -1,20 +1,20 @@
 use crate::{
     node_registry::ConnectionRegistry,
     protocol::{ServerRequest, ServerResponse},
-    vnode::{client_mdns::ClientMDNS, VNodeId},
+    server_context::{ServerContext, Transport},
+    vnode::{client_mdns::ClientMDNS, LocalMessageClient, VNodeId},
 };
 use async_trait::async_trait;
 use client::protocol::{ClientRequest, ClientResponse};
+use db::Database;
 use futures::{channel::mpsc, SinkExt};
 use net::{
-    quic::{Handler, Server, ServerError},
-    MessageClient, TransportError,
+    quic::QuicServer, tcp::TcpServer, Handler, MessageClient, Server, ServerError, TransportError,
 };
-use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, usize};
+use std::{collections::HashMap, sync::Arc, usize};
 use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{event, instrument, Level};
 use uhlc::{Timestamp, HLC};
-use uuid::Uuid;
 
 static REPLICATION_FACTOR: usize = 3;
 static CONSISTENCY_LEVEL: usize = match (REPLICATION_FACTOR / 2, REPLICATION_FACTOR % 2) {
@@ -269,6 +269,12 @@ async fn digest_get(
                     ServerResponse::Error { .. } => unreachable!(),
                 };
 
+                event!(
+                    Level::INFO,
+                    "Sending response to client: {:?}",
+                    client_response
+                );
+
                 // Update HLC
                 // Only on accepted read, may need to do this more often though
                 hlc.update_with_timestamp(response.request_id())
@@ -466,23 +472,30 @@ impl Handler<ClientRequest, ClientResponse> for ClientHandler {
 }
 
 pub(crate) struct ClientServer {
-    server: Server<ClientRequest, ClientResponse>,
+    server: Box<dyn Server<ClientRequest, ClientResponse>>,
 }
 
 impl ClientServer {
-    pub(crate) fn new(
-        node_id: Uuid,
-        core_id: Uuid,
-        local_ip: Ipv4Addr,
-        connection_registry: ConnectionRegistry<ServerRequest, ServerResponse>,
+    pub(crate) async fn new(
+        context: ServerContext<ServerRequest, ServerResponse>,
+        storage: Database,
     ) -> Result<Self, ServerError> {
+        let local_message_client = Box::new(LocalMessageClient::new(storage));
+        let connection_registry = ConnectionRegistry::new(
+            context.client_registry.clone(),
+            context.vnode_id.clone(),
+            local_message_client,
+        );
         let hlc = Arc::new(Mutex::new(uhlc::HLC::default()));
         let handler = ClientHandler::new(connection_registry, hlc);
-        let server = Server::new(handler)?;
+        let server: Box<dyn Server<ClientRequest, ClientResponse>> = match context.transport {
+            Transport::TCP => Box::new(TcpServer::new(handler).await?),
+            Transport::Quic => Box::new(QuicServer::new(handler)?),
+        };
 
-        println!("Starting Client Server on Port: {}", server.port);
+        println!("Starting Client Server on Port: {}", server.port());
 
-        let _mdns = ClientMDNS::new(node_id, core_id, local_ip, server.port);
+        let _mdns = ClientMDNS::new(context.clone(), server.port());
 
         Ok(Self { server })
     }

@@ -12,6 +12,8 @@ log = "0.4"
 thiserror = "1"
 bytes = "1"
 tokio = { version = "1.26", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 async-trait = "0.1"
 tracing = "0.1"
 uhlc = "0.5"
+yamux = "0.11"

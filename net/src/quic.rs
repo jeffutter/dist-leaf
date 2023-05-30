@@ -9,36 +9,17 @@ use std::{
     marker::{PhantomData, Send},
     net::SocketAddr,
 };
-use thiserror::Error;
 use tracing::instrument;
 
 use crate::{
-    Client, ClientError, Connection, DataStream, Decode, Encode, MessageClient, MessageStream,
-    TransportError,
+    Client, ClientError, Connection, DataStream, Decode, Encode, Handler, MessageClient,
+    MessageStream, Server, ServerError, TransportError,
 };
 
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static CERT_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/cert.pem"));
 /// NOTE: this certificate is to be used for demonstration purposes only!
 pub static KEY_PEM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/key.pem"));
-
-#[derive(Error, Debug)]
-pub enum ServerError {
-    #[error("transport error")]
-    Decoding(#[from] TransportError),
-    #[error("connection error")]
-    Connection(#[from] s2n_quic::connection::Error),
-    #[error("stream error")]
-    Stream(#[from] s2n_quic::stream::Error),
-    #[error("unknown server error")]
-    Unknown,
-    #[error("initialization error: {}", .0)]
-    Initialization(String),
-    #[error("unknown server error: {}", .0)]
-    UnknownWithMessage(String),
-    #[error("response error: {}", .0)]
-    Response(String),
-}
 
 #[derive(Clone)]
 pub struct QuicClient<Req, Res> {
@@ -198,20 +179,14 @@ impl<Req, Res> Debug for QuicMessageClient<Req, Res> {
     }
 }
 
-#[async_trait]
-pub trait Handler<Req, Res>: Send + 'static {
-    async fn call(&mut self, req: Req, send_tx: mpsc::Sender<Res>) -> Result<(), ServerError>;
-    fn box_clone(&self) -> Box<dyn Handler<Req, Res>>;
-}
-
-pub struct Server<Req, Res> {
+pub struct QuicServer<Req, Res> {
     handler: Box<dyn Handler<Req, Res>>,
     server: s2n_quic::Server,
     pub port: u16,
     phantom_data: PhantomData<Res>,
 }
 
-impl<Req, Res> Server<Req, Res>
+impl<Req, Res> QuicServer<Req, Res>
 where
     Req: Encode + Decode + Send + Sync + Debug + 'static,
     Res: Encode + Decode + Send + Sync + Debug + 'static,
@@ -238,15 +213,6 @@ where
         })
     }
 
-    pub async fn run(&mut self) -> Result<(), ServerError> {
-        while let Some(connection) = self.server.accept().await {
-            let handler = self.handler.box_clone();
-            tokio::spawn(Self::handle_connection(connection, handler));
-        }
-
-        Ok(())
-    }
-
     async fn handle_connection(mut connection: QConnection, handler: Box<dyn Handler<Req, Res>>) {
         while let Ok(Some(stream)) = connection.accept_bidirectional_stream().await {
             let handler = handler.box_clone();
@@ -265,7 +231,10 @@ where
         tokio::spawn(async move {
             while let Some(data) = send_rx.next().await {
                 let encoded = data.encode();
-                send_stream.send(encoded).await?;
+                send_stream
+                    .send(encoded)
+                    .await
+                    .map_err(|e| ServerError::UnknownWithMessage(e.to_string()))?;
             }
 
             Ok::<(), ServerError>(())
@@ -276,5 +245,25 @@ where
             let mut handler = handler.box_clone();
             tokio::spawn(async move { handler.call(req, send_tx).await });
         }
+    }
+}
+
+#[async_trait]
+impl<Req, Res> Server<Req, Res> for QuicServer<Req, Res>
+where
+    Req: Encode + Decode + Send + Sync + Debug + 'static,
+    Res: Encode + Decode + Send + Sync + Debug + 'static,
+{
+    async fn run(&mut self) -> Result<(), ServerError> {
+        while let Some(connection) = self.server.accept().await {
+            let handler = self.handler.box_clone();
+            tokio::spawn(Self::handle_connection(connection, handler));
+        }
+
+        Ok(())
+    }
+
+    fn port(&self) -> u16 {
+        self.port
     }
 }

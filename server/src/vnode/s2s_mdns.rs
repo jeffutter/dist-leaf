@@ -1,16 +1,14 @@
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
-use net::quic::QuicClient;
+use net::{quic::QuicClient, tcp::TcpClient};
 use tokio::{task, time};
 use uuid::Uuid;
 
 use crate::{
-    node_registry::{ClientRegistry, Locality},
+    node_registry::Locality,
     protocol::{ServerRequest, ServerResponse},
+    server_context::{ServerContext, Transport},
     ServerError, VNodeId,
 };
 
@@ -18,33 +16,27 @@ use crate::{
 pub struct S2SMDNS {
     receiver: Receiver<ServiceEvent>,
     local_socket_addr: SocketAddr,
-    client_registry: ClientRegistry<ServerRequest, ServerResponse>,
-    node_id: Uuid,
+    context: ServerContext<ServerRequest, ServerResponse>,
 }
 
 impl S2SMDNS {
-    pub(crate) fn new(
-        node_id: Uuid,
-        core_id: Uuid,
-        client_registry: ClientRegistry<ServerRequest, ServerResponse>,
-        local_ip: Ipv4Addr,
-        port: u16,
-    ) -> Self {
-        let local_socket_addr: SocketAddr = format!("{}:{}", local_ip, port).parse().unwrap();
+    pub(crate) fn new(context: ServerContext<ServerRequest, ServerResponse>, port: u16) -> Self {
+        let local_socket_addr: SocketAddr =
+            format!("{}:{}", context.local_ip, port).parse().unwrap();
         let mdns = ServiceDaemon::new().expect("Failed to create daemon");
         let service_type = "_quic-db-priv._udp.local.";
         let receiver = mdns.browse(service_type).expect("Failed to browse");
-        let instance_name = format!("node-{}", core_id);
-        let host_name = format!("{}.local.", local_ip);
+        let instance_name = format!("node-{}", context.core_id);
+        let host_name = format!("{}.local.", context.local_ip);
         let properties = [
-            ("node_id".to_string(), node_id.to_string()),
-            ("core_id".to_string(), core_id.to_string()),
+            ("node_id".to_string(), context.node_id.to_string()),
+            ("core_id".to_string(), context.core_id.to_string()),
         ];
         let my_service = ServiceInfo::new(
             service_type,
             &instance_name,
             &host_name,
-            local_ip,
+            context.local_ip,
             port,
             &properties[..],
         )
@@ -56,8 +48,7 @@ impl S2SMDNS {
         Self {
             receiver,
             local_socket_addr,
-            client_registry,
-            node_id,
+            context,
         }
     }
 
@@ -65,8 +56,9 @@ impl S2SMDNS {
         let mut interval = time::interval(Duration::from_secs(30));
         let receiver = self.receiver.clone();
         let local_socket_addr = self.local_socket_addr.clone();
-        let mut client_registry = self.client_registry.clone();
-        let this_node_id = self.node_id.clone();
+        let mut client_registry = self.context.client_registry.clone();
+        let this_node_id = self.context.node_id.clone();
+        let transport = self.context.transport;
 
         task::spawn(async move {
             loop {
@@ -104,12 +96,26 @@ impl S2SMDNS {
                                 );
 
                                 if socket_addr != local_socket_addr {
-                                    let client = QuicClient::new(socket_addr)
-                                        .map_err(|e| ServerError::Initialization(e.to_string()))?;
-
-                                    client_registry
-                                        .add(vnode_id, &Locality::Remote, client)
-                                        .await
+                                    match transport {
+                                        Transport::TCP => {
+                                            let client =
+                                                TcpClient::new(socket_addr).map_err(|e| {
+                                                    ServerError::Initialization(e.to_string())
+                                                })?;
+                                            client_registry
+                                                .add(vnode_id, &Locality::Remote, client)
+                                                .await
+                                        }
+                                        Transport::Quic => {
+                                            let client =
+                                                QuicClient::new(socket_addr).map_err(|e| {
+                                                    ServerError::Initialization(e.to_string())
+                                                })?;
+                                            client_registry
+                                                .add(vnode_id, &Locality::Remote, client)
+                                                .await
+                                        }
+                                    }
                                 }
                             }
                         }

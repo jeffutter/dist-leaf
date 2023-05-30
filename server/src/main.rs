@@ -1,17 +1,20 @@
 mod node_registry;
 mod protocol;
+mod server_context;
 mod vnode;
 
 use clap::Parser;
 use db::Database;
 use env_logger::Env;
-use net::quic::ServerError;
-use std::{collections::HashMap, error::Error, thread};
+use net::ServerError;
+use std::{error::Error, thread};
 use tokio::runtime;
 use uuid::Uuid;
 use vnode::VNodeId;
 
 use crate::node_registry::ClientRegistry;
+use crate::protocol::{ServerRequest, ServerResponse};
+use crate::server_context::ServerContext;
 use crate::vnode::VNode;
 use tempfile::TempDir;
 
@@ -22,6 +25,8 @@ pub mod server_capnp {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[arg(short, long, value_enum)]
+    transport: server_context::Transport,
     data_path: Option<std::path::PathBuf>,
 }
 
@@ -67,43 +72,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let core_ids = core_affinity::get_core_ids().unwrap();
 
-    let mut core_to_vnode_id: HashMap<usize, VNodeId> =
-        core_ids
-            .iter()
-            .fold(HashMap::new(), |mut core_to_vnode_id, id| {
-                let id = id.id;
-                let id_key = format!("core_id:{}:{}", node_id, id);
-                let core_id = match shared_db.get(&id_key) {
-                    Ok(None) => {
-                        let core_id = Uuid::new_v4();
-                        shared_db
-                            .put(
-                                &id_key,
-                                &db::DBValue::new(&core_id.to_string(), hlc.new_timestamp()),
-                            )
-                            .unwrap();
-                        core_id
-                    }
-                    Ok(Some(data)) => data.data.parse().unwrap(),
-                    _ => unimplemented!(),
-                };
-                let vnode_id = VNodeId::new(node_id, core_id);
-                core_to_vnode_id.insert(id, vnode_id.clone());
-                core_to_vnode_id
-            });
-
     let client_registry = ClientRegistry::new();
 
     let handles = core_ids
         .into_iter()
         .map(|id| {
-            let vnode_id = core_to_vnode_id.remove(&id.id).unwrap();
-            let VNodeId { node_id, core_id } = vnode_id;
-            let client_registry = client_registry.clone();
+            let id_key = format!("core_id:{}:{}", node_id, id.id);
+            let core_id = match shared_db.get(&id_key) {
+                Ok(None) => {
+                    let core_id = Uuid::new_v4();
+                    shared_db
+                        .put(
+                            &id_key,
+                            &db::DBValue::new(&core_id.to_string(), hlc.new_timestamp()),
+                        )
+                        .unwrap();
+                    core_id
+                }
+                Ok(Some(data)) => data.data.parse().unwrap(),
+                _ => unimplemented!(),
+            };
 
             let mut data_path = base_path.clone();
-            // data_path.push(core_id.to_string());
             data_path.push(id.id.to_string());
+
+            let context: ServerContext<ServerRequest, ServerResponse> = ServerContext::new(
+                node_id,
+                core_id,
+                args.transport,
+                local_ip,
+                data_path.clone(),
+                client_registry.clone(),
+            );
 
             thread::spawn(move || {
                 // Pin this thread to a single CPU core.
@@ -117,9 +117,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     log::info!("Starting Thread: #{:?}", id);
 
                     rt.block_on(async {
-                        let mut vnode =
-                            VNode::new(node_id, core_id, local_ip, client_registry, data_path)
-                                .await?;
+                        let mut vnode = VNode::new(context).await?;
 
                         let _ = vnode.s2s_server.mdns.spawn().await;
                         vnode.run().await?;

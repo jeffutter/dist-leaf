@@ -1,9 +1,10 @@
 mod mdns;
 mod protocol;
 
+use clap::{Parser, ValueEnum};
 use env_logger::Env;
 use futures::{channel::mpsc::channel, StreamExt};
-use net::{quic::QuicClient, Client};
+use net::{quic::QuicClient, tcp::TcpClient, Client};
 use protocol::{ClientRequest, ClientResponse};
 use std::{
     error::Error,
@@ -15,10 +16,24 @@ pub mod client_capnp {
     include!(concat!(env!("OUT_DIR"), "/client_capnp.rs"));
 }
 
+#[derive(ValueEnum, Copy, Clone, Debug, PartialEq, Eq)]
+enum Transport {
+    TCP,
+    Quic,
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, value_enum)]
+    transport: Transport,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // tracing_subscriber::fmt::init();
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    let args = Args::parse();
 
     let mdns = mdns::MDNS::new();
     let _mdns_jh = mdns.spawn().await;
@@ -28,11 +43,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let server_cons = mdns.rx.borrow();
     let addr = server_cons.iter().next().unwrap();
     let hlc = Arc::new(Mutex::new(uhlc::HLC::default()));
-    println!("Client Found: {:?}", addr);
+    println!("Server Found: {:?}", addr);
 
-    let client: QuicClient<ClientRequest, ClientResponse> = QuicClient::new(*addr)?;
+    let client: Box<dyn Client<ClientRequest, ClientResponse>> = match args.transport {
+        Transport::TCP => Box::new(TcpClient::new(*addr)?),
+        Transport::Quic => Box::new(QuicClient::new(*addr)?),
+    };
+    println!("Client Built");
     let connection = client.connection().await?;
+    println!("Connection Established");
     let mut stream = connection.stream().await?;
+    println!("Stream Established");
 
     println!("Client Ready");
 

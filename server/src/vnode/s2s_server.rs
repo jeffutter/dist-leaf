@@ -1,7 +1,7 @@
 use crate::{
-    node_registry::{ClientRegistry, Locality},
+    node_registry::Locality,
     protocol::{ServerRequest, ServerResponse},
-    vnode::VNodeId,
+    server_context::{ServerContext, Transport},
 };
 use async_trait::async_trait;
 use db::DBValue;
@@ -9,13 +9,8 @@ use futures::{
     channel::{mpsc, oneshot},
     select, FutureExt, SinkExt, StreamExt,
 };
-use net::{
-    channel::ChannelClient,
-    quic::{Handler, Server, ServerError},
-};
-use std::net::Ipv4Addr;
+use net::{channel::ChannelClient, quic::QuicServer, tcp::TcpServer, Handler, Server, ServerError};
 use tracing::instrument;
-use uuid::Uuid;
 
 use super::s2s_mdns::S2SMDNS;
 
@@ -50,31 +45,31 @@ impl Handler<ServerRequest, ServerResponse> for ServerHandler {
 pub(crate) struct S2SServer {
     storage: db::Database,
     pub(crate) mdns: S2SMDNS,
-    server: Server<ServerRequest, ServerResponse>,
+    server: Box<dyn Server<ServerRequest, ServerResponse>>,
     rx: mpsc::Receiver<(ServerRequest, oneshot::Sender<ServerResponse>)>,
 }
 
 impl S2SServer {
     pub(crate) async fn new(
-        node_id: Uuid,
-        core_id: Uuid,
-        local_ip: Ipv4Addr,
+        mut context: ServerContext<ServerRequest, ServerResponse>,
         storage: db::Database,
-        mut client_registry: ClientRegistry<ServerRequest, ServerResponse>,
     ) -> Result<Self, ServerError> {
-        let vnode_id = VNodeId::new(node_id, core_id);
         let handler = ServerHandler::new(storage.clone());
-        let server = Server::new(handler)?;
+        let server: Box<dyn Server<ServerRequest, ServerResponse>> = match context.transport {
+            Transport::TCP => Box::new(TcpServer::new(handler).await?),
+            Transport::Quic => Box::new(QuicServer::new(handler)?),
+        };
 
-        log::debug!("Starting S2S Server on Port: {}", server.port);
+        log::debug!("Starting S2S Server on Port: {}", server.port());
 
         let (tx, rx) = mpsc::channel::<(ServerRequest, oneshot::Sender<ServerResponse>)>(1);
         let client = ChannelClient::new(tx);
-        client_registry
-            .add(vnode_id, &Locality::Channel, client)
+        context
+            .client_registry
+            .add(context.vnode_id.clone(), &Locality::Channel, client)
             .await;
 
-        let mdns = S2SMDNS::new(node_id, core_id, client_registry, local_ip, server.port);
+        let mdns = S2SMDNS::new(context, server.port());
 
         Ok(Self {
             storage,

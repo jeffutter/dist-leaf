@@ -4,15 +4,14 @@ pub(crate) mod s2s_mdns;
 mod s2s_server;
 
 use crate::{
-    node_registry::{ClientRegistry, ConnectionRegistry},
     protocol::{ServerRequest, ServerResponse},
+    server_context::ServerContext,
     vnode::{client_server::ClientServer, s2s_server::S2SServer},
 };
 use async_trait::async_trait;
 use db::DBValue;
-use net::{quic::ServerError, MessageClient, TransportError};
+use net::{MessageClient, ServerError, TransportError};
 use std::fmt::Debug;
-use std::net::Ipv4Addr;
 use tokio::try_join;
 use tracing::instrument;
 use uuid::Uuid;
@@ -36,21 +35,11 @@ pub(crate) struct VNode {
 
 impl VNode {
     pub(crate) async fn new(
-        node_id: Uuid,
-        core_id: Uuid,
-        local_ip: Ipv4Addr,
-        client_registry: ClientRegistry<ServerRequest, ServerResponse>,
-        data_path: std::path::PathBuf,
+        context: ServerContext<ServerRequest, ServerResponse>,
     ) -> Result<Self, ServerError> {
-        let vnode_id = VNodeId::new(node_id, core_id);
-        let storage = db::Database::new(&data_path);
-
-        let local_message_client = Box::new(LocalMessageClient::new(storage.clone()));
-        let connection_registry =
-            ConnectionRegistry::new(client_registry.clone(), vnode_id, local_message_client);
-        let s2s_server =
-            S2SServer::new(node_id, core_id, local_ip, storage.clone(), client_registry).await?;
-        let client_server = ClientServer::new(node_id, core_id, local_ip, connection_registry)?;
+        let storage = db::Database::new(&context.data_path);
+        let s2s_server = S2SServer::new(context.clone(), storage.clone()).await?;
+        let client_server = ClientServer::new(context.clone(), storage).await?;
 
         Ok(Self {
             client_server,

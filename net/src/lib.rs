@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use futures::{Stream, StreamExt};
+use futures::{channel::mpsc, Stream, StreamExt};
 use std::{
     convert::From,
     fmt::Debug,
@@ -13,6 +13,8 @@ use tracing::instrument;
 
 pub mod channel;
 pub mod quic;
+pub mod tcp;
+mod tokio_adapter;
 
 #[derive(Error, Debug)]
 pub enum TransportError {
@@ -20,6 +22,10 @@ pub enum TransportError {
     Decoding(String),
     #[error("connection error")]
     Connection(#[from] s2n_quic::connection::Error),
+    #[error("connection error")]
+    TcpConnection(#[from] std::io::Error),
+    #[error("connection error")]
+    MuxConnection(#[from] yamux::ConnectionError),
     #[error("stream error")]
     Stream(#[from] s2n_quic::stream::Error),
     #[error("unknown server error: {}", .0)]
@@ -38,6 +44,20 @@ pub enum ClientError {
     Transport(#[from] TransportError),
     #[error("unknown client error")]
     Unknown,
+}
+
+#[derive(Error, Debug)]
+pub enum ServerError {
+    #[error("transport error")]
+    Decoding(#[from] TransportError),
+    #[error("unknown server error")]
+    Unknown,
+    #[error("initialization error: {}", .0)]
+    Initialization(String),
+    #[error("unknown server error: {}", .0)]
+    UnknownWithMessage(String),
+    #[error("response error: {}", .0)]
+    Response(String),
 }
 
 struct ProtoReader {
@@ -191,22 +211,38 @@ where
     }
 }
 
+/// A inert network client. The client shouldn't contain any connections
 #[async_trait]
 pub trait Client<Req, Res>: Send + Sync {
     async fn connection(&self) -> Result<Box<dyn Connection<Req, Res>>, TransportError>;
     fn box_clone(&self) -> Box<dyn Client<Req, Res>>;
 }
 
+/// A network connection. The connection should represent a single connection to a remote server
+/// and be able to create multiple streams over that connection.
 #[async_trait]
 pub trait Connection<Req, Res>: Send + Sync {
     async fn stream(&self) -> Result<Box<dyn MessageClient<Req, Res>>, TransportError>;
     fn box_clone(&self) -> Box<dyn Connection<Req, Res>>;
 }
 
+/// A stream over a connection. The stream can send multiple sequential request/responses
 #[async_trait]
 pub trait MessageClient<Req, Res>: Send + Sync + Debug {
     async fn request(&mut self, req: Req) -> Result<Res, TransportError>;
     fn box_clone(&self) -> Box<dyn MessageClient<Req, Res>>;
+}
+
+#[async_trait]
+pub trait Server<Req, Res> {
+    async fn run(&mut self) -> Result<(), ServerError>;
+    fn port(&self) -> u16;
+}
+
+#[async_trait]
+pub trait Handler<Req, Res>: Send + Sync + 'static {
+    async fn call(&mut self, req: Req, send_tx: mpsc::Sender<Res>) -> Result<(), ServerError>;
+    fn box_clone(&self) -> Box<dyn Handler<Req, Res>>;
 }
 
 #[derive(Debug, Clone)]
