@@ -17,7 +17,7 @@ bytes = "1"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3"
 mdns-sd = "0.7.1"
-uhlc = "0.5"
+uhlc = "0.6"
 clap = { version = "4.2", features = ["derive"] }
 
 [build-dependencies]

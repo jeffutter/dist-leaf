@@ -9,7 +9,7 @@ edition = "2021"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 fake = "2.5"
 rand = "0.8"
-itertools = "0.10.5"
+itertools = "0.11"
 
 [dependencies]
 client = { path = "../client" }
@@ -18,7 +18,7 @@ futures = "0.3.26"
 env_logger = "0.10.0"
 log = "0.4"
 net = { path = "../net" }
-uhlc = "0.5"
+uhlc = "0.6"
 
 [[bench]]
 name = "server"

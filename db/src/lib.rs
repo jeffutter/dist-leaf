@@ -25,7 +25,7 @@ pub struct DBValue {
 impl DBValue {
     pub fn new(data: &str, ts: uhlc::Timestamp) -> Self {
         let mut hasher = Xxh3::new();
-        hasher.update(ts.get_id().as_slice());
+        hasher.update(&ts.get_id().to_le_bytes());
         hasher.update(&ts.get_time().as_u64().to_le_bytes());
         hasher.update(data.as_bytes());
         Self {
